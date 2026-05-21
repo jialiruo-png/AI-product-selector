@@ -61,11 +61,11 @@ wf = "webfetcher.cli:main"
 wd = "webfetcher.doc_cli:main"
 
 # Hatchling 配置
-[tool.hatchling.build.targets.wheel]
+[tool.hatch.build.targets.wheel]
 packages = ["src/webfetcher"]
 
 # 包含配置文件作为 package data
-[tool.hatchling.build.targets.sdist]
+[tool.hatch.build.targets.sdist]
 include = [
     "/src/webfetcher",
     "/config/*.yaml",
