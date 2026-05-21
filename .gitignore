@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime outputs
+采集工作台/素材库/
+采集工作台/outputs/
+采集工作台/topics/
+采集工作台/logs/
+*.log
+
+# Temporary media generated during collection
+*-media/
+assets/
+images/
+media/

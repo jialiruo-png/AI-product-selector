@@ -1,0 +1,12 @@
+-e ./web-fetcher
+requests>=2.28.0
+pyyaml>=6.0.0
+html2text>=2020.1.16
+jsonschema>=4.0.0
+lxml>=4.9.0
+beautifulsoup4>=4.9.0
+selenium>=4.15.0,<5.0.0
+pychrome==0.2.3
+python-docx>=0.8.11
+trafilatura>=2.0.0
+readability-lxml>=0.8.1

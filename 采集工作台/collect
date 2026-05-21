@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKBENCH_DIR="$ROOT_DIR/采集工作台"
+WF_BIN="$ROOT_DIR/web-fetcher/.venv/bin/wf"
+LIBRARY_DIR="$WORKBENCH_DIR/素材库"
+OPENCLI_BIN="$(command -v opencli || true)"
+if [ -z "$OPENCLI_BIN" ] && [ -x "$HOME/.local/bin/opencli" ]; then
+  OPENCLI_BIN="$HOME/.local/bin/opencli"
+fi
+INLINE_IMAGES_BIN="$WORKBENCH_DIR/scripts/inline_markdown_images.py"
+
+usage() {
+  cat <<'EOF'
+用法：
+  ./采集工作台/collect "公众号文章链接"
+  ./采集工作台/collect "AI启蒙 小学生 图像识别" --limit 5
+
+常用参数：
+  --limit N          关键词模式最多采集 N 篇，默认 5
+  --name NAME        手动指定本次素材库文件夹名称
+  --delay SECONDS    抓取间隔，默认 3
+  --timeout SECONDS  单篇超时，默认 60
+  --local-images     兼容旧参数；现在默认会把图片内嵌进 Markdown，不保留 assets 目录
+  -h, --help         查看帮助
+
+输出：
+  采集工作台/素材库/<本次名称>/
+EOF
+}
+
+is_url() {
+  case "$1" in
+    http://*|https://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+safe_slug() {
+  "$ROOT_DIR/web-fetcher/.venv/bin/python" - "$1" <<'PY'
+import hashlib
+import re
+import sys
+
+text = sys.argv[1].strip()
+cleaned = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", text, flags=re.UNICODE).strip("-._")
+if not cleaned:
+    cleaned = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+print(cleaned[:48])
+PY
+}
+
+count_images() {
+  local dir="$1"
+  find "$dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' \) 2>/dev/null | wc -l | tr -d ' '
+}
+
+count_embedded_images() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    printf '0'
+    return
+  fi
+  rg -o '!\[[^]]*\]\(data:image/[^)]+' "$dir" -g '*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+count_remote_image_links() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    printf '0'
+    return
+  fi
+  rg -o '!\[[^]]*\]\(https?://[^)]+' "$dir" -g '*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+copy_seed_urls() {
+  local input="$1"
+  local limit="$2"
+  local dest="$3"
+  local seed_file=""
+
+  case "$input" in
+    *AI启蒙*|*ai启蒙*|*人工智能启蒙*|*小学生*AI*|*孩子*AI*|*亲子*AI*|*家长*AI*|*家庭*AI*|*AI教育*|*人工智能教育*)
+      seed_file="$WORKBENCH_DIR/urls/ai_enlightenment_top5.txt"
+      ;;
+  esac
+
+  if [ -z "$seed_file" ] || [ ! -f "$seed_file" ]; then
+    return 1
+  fi
+
+  grep -Ev '^[[:space:]]*($|#)' "$seed_file" | head -n "$limit" > "$dest"
+  [ -s "$dest" ]
+}
+
+search_weixin_urls() {
+  local input="$1"
+  local limit="$2"
+  local dest="$3"
+  local log_file="$4"
+
+  if [ -z "$OPENCLI_BIN" ]; then
+    echo "未找到 opencli，跳过微信搜索。" >> "$log_file"
+    return 1
+  fi
+
+  echo "使用 OpenCLI 搜狗微信搜索：$input" >> "$log_file"
+  "$OPENCLI_BIN" weixin search "$input" --limit "$limit" -f json > "$TMP_DIR/opencli-search.json" 2>> "$log_file" || return 1
+
+  "$ROOT_DIR/web-fetcher/.venv/bin/python" - "$TMP_DIR/opencli-search.json" "$dest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+data = json.loads(src.read_text(encoding="utf-8") or "[]")
+urls = []
+seen = set()
+for item in data:
+    url = str(item.get("url", "")).strip()
+    if not url or url in seen:
+        continue
+    seen.add(url)
+    urls.append(url)
+dest.write_text("\n".join(urls) + ("\n" if urls else ""), encoding="utf-8")
+PY
+
+  [ -s "$dest" ]
+}
+
+fetch_urls_file() {
+  local url_file="$1"
+  local output_dir="$2"
+  local log_file="$3"
+  local total
+  local index=0
+  local url
+
+  total=$(grep -Ev '^[[:space:]]*($|#)' "$url_file" | wc -l | tr -d ' ')
+  echo "准备抓取：$total 篇"
+
+  while IFS= read -r url || [ -n "$url" ]; do
+    url="$(printf '%s' "$url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -z "$url" ] || [[ "$url" == \#* ]]; then
+      continue
+    fi
+
+    index=$((index + 1))
+    echo "抓取中：$index/$total"
+
+    wf_args=("$url" "-o" "$output_dir" "--timeout" "$TIMEOUT" "--download-assets" "--assets-root" "assets")
+
+    "$WF_BIN" "${wf_args[@]}" >> "$log_file" 2>&1 || true
+
+    if [ "$index" -lt "$total" ] && [ "$DELAY" != "0" ]; then
+      sleep "$DELAY"
+    fi
+  done < "$url_file"
+
+  find "$output_dir" -maxdepth 1 -type f -name 'FAILED_*.md' -delete 2>/dev/null || true
+}
+
+resolve_weixin_redirects() {
+  local src="$1"
+  local dest="$2"
+  local log_file="$3"
+  : > "$dest"
+
+  while IFS= read -r url || [ -n "$url" ]; do
+    url="$(printf '%s' "$url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$url" ] || continue
+
+    case "$url" in
+      https://mp.weixin.qq.com/*|http://mp.weixin.qq.com/*)
+        printf '%s\n' "$url" >> "$dest"
+        ;;
+      https://weixin.sogou.com/link*|http://weixin.sogou.com/link*)
+        open_result=$("$OPENCLI_BIN" browser default open "$url" 2>> "$log_file" || true)
+        page_id=$(printf '%s\n' "$open_result" | sed -n 's/.*"page"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -n "$page_id" ]; then
+          state=$("$OPENCLI_BIN" browser default state --tab "$page_id" 2>> "$log_file" || true)
+          final_url=$(printf '%s\n' "$state" | awk '/^URL: https?:\/\/mp\.weixin\.qq\.com\// {sub(/^URL: /, ""); print; exit}')
+          if [ -z "$final_url" ]; then
+            sleep 2
+            state=$("$OPENCLI_BIN" browser default state --tab "$page_id" 2>> "$log_file" || true)
+            final_url=$(printf '%s\n' "$state" | awk '/^URL: https?:\/\/mp\.weixin\.qq\.com\// {sub(/^URL: /, ""); print; exit}')
+          fi
+          if [ -n "$final_url" ]; then
+            printf '%s\n' "$final_url" >> "$dest"
+          else
+            echo "未能解析搜狗跳转最终链接：$url" >> "$log_file"
+          fi
+        fi
+        ;;
+    esac
+  done < "$src"
+
+  awk 'NF && !seen[$0]++' "$dest" > "$dest.tmp" && mv "$dest.tmp" "$dest"
+  [ -s "$dest" ]
+}
+
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+case "$1" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+INPUT="$1"
+shift
+
+LIMIT=5
+CUSTOM_NAME=""
+DELAY=3
+TIMEOUT=60
+LOCAL_IMAGES=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --limit)
+      LIMIT="${2:-5}"
+      shift 2
+      ;;
+    --name)
+      CUSTOM_NAME="${2:-}"
+      shift 2
+      ;;
+    --delay)
+      DELAY="${2:-3}"
+      shift 2
+      ;;
+    --timeout)
+      TIMEOUT="${2:-60}"
+      shift 2
+      ;;
+    --local-images)
+      LOCAL_IMAGES=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "未知参数：$1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ ! -x "$WF_BIN" ]; then
+  echo "没有找到 web-fetcher 运行环境：$WF_BIN"
+  echo "先确认 web-fetcher/.venv 已安装好。"
+  exit 1
+fi
+
+mkdir -p "$LIBRARY_DIR"
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+if [ -n "$CUSTOM_NAME" ]; then
+  RUN_NAME="$(safe_slug "$CUSTOM_NAME")"
+else
+  RUN_NAME="$(date +%Y-%m-%d)-$(safe_slug "$INPUT")"
+fi
+
+TARGET_DIR="$LIBRARY_DIR/$RUN_NAME"
+if [ -e "$TARGET_DIR" ]; then
+  TARGET_DIR="$LIBRARY_DIR/$RUN_NAME-$STAMP"
+fi
+
+ARTICLE_DIR="$TARGET_DIR"
+mkdir -p "$ARTICLE_DIR"
+
+TMP_DIR="$(mktemp -d /tmp/ai-material-collect.XXXXXX)"
+LOG_FILE="$TMP_DIR/collect-$STAMP.log"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo "开始采集：$INPUT"
+echo "素材库：$TARGET_DIR"
+echo "图片模式：内嵌到 Markdown，不保留图片目录"
+
+if is_url "$INPUT"; then
+  MODE="link"
+  SOURCE_NOTE="直接链接采集"
+  echo "模式：链接采集"
+  URLS_FILE="$TMP_DIR/input_urls.txt"
+  printf '%s\n' "$INPUT" > "$URLS_FILE"
+  fetch_urls_file "$URLS_FILE" "$ARTICLE_DIR" "$LOG_FILE"
+  STATUS=0
+else
+  MODE="keyword"
+  SOURCE_NOTE="关键词实时搜索"
+  echo "模式：关键词采集，最多 $LIMIT 篇"
+  OPENCLI_URLS="$TMP_DIR/opencli_sogou_urls.txt"
+  RESOLVED_URLS="$TMP_DIR/opencli_resolved_urls.txt"
+  if search_weixin_urls "$INPUT" "$LIMIT" "$OPENCLI_URLS" "$LOG_FILE" && resolve_weixin_redirects "$OPENCLI_URLS" "$RESOLVED_URLS" "$LOG_FILE"; then
+    SOURCE_NOTE="OpenCLI 搜狗微信实时搜索"
+    echo "搜索来源：OpenCLI 搜狗微信"
+    fetch_urls_file "$RESOLVED_URLS" "$ARTICLE_DIR" "$LOG_FILE"
+    STATUS=0
+  else
+    echo "OpenCLI 微信搜索未拿到可抓取公众号链接。" >> "$LOG_FILE"
+    STATUS=1
+  fi
+
+  CURRENT_COUNT=$(find "$ARTICLE_DIR" -maxdepth 1 -type f -name '*.md' ! -name 'FAILED_*.md' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$CURRENT_COUNT" = "0" ]; then
+    SEED_URLS="$TMP_DIR/seed_urls.txt"
+    if copy_seed_urls "$INPUT" "$LIMIT" "$SEED_URLS"; then
+      SOURCE_NOTE="关键词搜索无结果，使用本地 AI 启蒙种子库兜底"
+      echo "搜索结果为空，启用本地 AI 启蒙种子库兜底"
+      echo "搜索结果为空，启用本地种子链接兜底：$SEED_URLS" >> "$LOG_FILE"
+      fetch_urls_file "$SEED_URLS" "$ARTICLE_DIR" "$LOG_FILE"
+      STATUS=0
+    fi
+  fi
+fi
+
+ARTICLE_COUNT=$(find "$ARTICLE_DIR" -maxdepth 1 -type f -name '*.md' ! -name 'FAILED_*.md' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$ARTICLE_COUNT" != "0" ] && [ -x "$INLINE_IMAGES_BIN" ]; then
+  "$INLINE_IMAGES_BIN" "$ARTICLE_DIR" >> "$LOG_FILE" 2>&1 || true
+fi
+IMAGE_COUNT=$(count_images "$ARTICLE_DIR")
+EMBEDDED_IMAGE_COUNT=$(count_embedded_images "$ARTICLE_DIR")
+REMOTE_IMAGE_COUNT=$(count_remote_image_links "$ARTICLE_DIR")
+
+echo "采集完成：$ARTICLE_COUNT 篇文章，$EMBEDDED_IMAGE_COUNT 张内嵌图片，$REMOTE_IMAGE_COUNT 个远程图片链接，$IMAGE_COUNT 张残留本地图片"
+echo "素材来源：$SOURCE_NOTE"
+echo "输出目录：$ARTICLE_DIR"
+
+if [ "$STATUS" -ne 0 ] && [ "$ARTICLE_COUNT" = "0" ]; then
+  if grep -q "Browser Bridge extension not connected" "$LOG_FILE"; then
+    echo "失败原因：OpenCLI 浏览器扩展未连接。"
+  elif grep -q "未找到 opencli" "$LOG_FILE"; then
+    echo "失败原因：没有找到 OpenCLI。"
+  elif grep -q "未拿到可抓取公众号链接" "$LOG_FILE"; then
+    echo "失败原因：没有搜索到可抓取的公众号链接。"
+  else
+    echo "失败原因：没有成功拿到正文。"
+  fi
+  rm -rf "$TARGET_DIR"
+  exit "$STATUS"
+fi
+
+exit 0

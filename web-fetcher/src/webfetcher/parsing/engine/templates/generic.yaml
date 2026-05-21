@@ -1,0 +1,95 @@
+# Generic Web Template v3.0
+# Minimal metadata extraction — content extraction delegated to trafilatura
+# Site-specific templates (WeChat, XHS, qcc_com) still handle special structures
+
+name: "Generic Web Template"
+version: "3.0.0"
+domains:
+  - "*"  # Matches all domains as fallback
+
+selectors:
+  # ---------------------------------------------------------------------------
+  # TITLE EXTRACTION (meta tags + semantic HTML only)
+  # ---------------------------------------------------------------------------
+  title:
+    - selector: "meta[property='og:title']"
+      strategy: "css"
+      attribute: "content"
+    - selector: "meta[name='twitter:title']"
+      strategy: "css"
+      attribute: "content"
+    - selector: "meta[itemprop='headline']"
+      strategy: "css"
+      attribute: "content"
+    - selector: "title"
+      strategy: "css"
+    - selector: "h1"
+      strategy: "css"
+    - selector: "article h1"
+      strategy: "css"
+
+  # ---------------------------------------------------------------------------
+  # CONTENT — intentionally empty; trafilatura handles extraction
+  # TemplateParser will return empty content, triggering trafilatura fallback
+  # ---------------------------------------------------------------------------
+  content: []
+
+  # ---------------------------------------------------------------------------
+  # METADATA EXTRACTION (meta tags only — reliable across all sites)
+  # ---------------------------------------------------------------------------
+  metadata:
+    description:
+      - selector: "meta[property='og:description']"
+        strategy: "css"
+        attribute: "content"
+      - selector: "meta[name='description']"
+        strategy: "css"
+        attribute: "content"
+
+    author:
+      - selector: "meta[name='author']"
+        strategy: "css"
+        attribute: "content"
+      - selector: "meta[property='article:author']"
+        strategy: "css"
+        attribute: "content"
+
+    date:
+      - selector: "meta[property='article:published_time']"
+        strategy: "css"
+        attribute: "content"
+      - selector: "meta[property='article:modified_time']"
+        strategy: "css"
+        attribute: "content"
+      - selector: "time[datetime]"
+        strategy: "css"
+        attribute: "datetime"
+      - selector: "meta[name='date']"
+        strategy: "css"
+        attribute: "content"
+
+    image:
+      - selector: "meta[property='og:image']"
+        strategy: "css"
+        attribute: "content"
+      - selector: "meta[name='twitter:image']"
+        strategy: "css"
+        attribute: "content"
+
+    site_name:
+      - selector: "meta[property='og:site_name']"
+        strategy: "css"
+        attribute: "content"
+
+    keywords:
+      - selector: "meta[name='keywords']"
+        strategy: "css"
+        attribute: "content"
+
+    canonical_url:
+      - selector: "link[rel='canonical']"
+        strategy: "css"
+        attribute: "href"
+      - selector: "meta[property='og:url']"
+        strategy: "css"
+        attribute: "content"

@@ -1,0 +1,5864 @@
+#!/usr/bin/env python3
+"""
+Unified web fetcher CLI (single file).
+Supports WeChat (mp.weixin.qq.com), Xiaohongshu (xiaohongshu.com), and generic sites.
+
+Features
+- Static fetch with UA control; optional headless rendering (Playwright) for JS-heavy pages.
+- Site-specific adapters for WeChat and Xiaohongshu; generic fallback.
+- Clean Markdown output named as: YYYY-MM-DD - 标题.md
+"""
+
+__version__ = "1.3.6"
+__author__ = "WebFetcher Team"
+
+import argparse
+import datetime
+import html as ihtml
+import json
+import os
+import re
+import http.client as http_client
+import urllib.parse
+import urllib.request
+import urllib.error
+import ssl
+import sys
+from typing import Optional, List, Dict, Set, Any
+from dataclasses import dataclass, field
+from enum import Enum
+from html.parser import HTMLParser
+from pathlib import Path
+import logging
+import time
+import random
+import signal
+import socket as _socket
+from collections import deque
+import xml.etree.ElementTree as ET
+import gzip
+
+# Selenium integration (Phase 2) - graceful degradation when not available
+try:
+    from webfetcher.fetchers.config import SeleniumConfig
+    from webfetcher.fetchers.selenium import SeleniumFetcher, SeleniumMetrics, ChromeConnectionError, SeleniumFetchError, SeleniumTimeoutError, SeleniumNotAvailableError
+    SELENIUM_INTEGRATION_AVAILABLE = True
+except ImportError as e:
+    logging.debug(f"Selenium integration not available: {e}")
+    SELENIUM_INTEGRATION_AVAILABLE = False
+    # Create dummy classes to prevent import errors
+    class SeleniumConfig: pass
+    class SeleniumFetcher: pass
+    class SeleniumMetrics: pass
+    class ChromeConnectionError(Exception): pass
+    class SeleniumFetchError(Exception): pass
+    class SeleniumTimeoutError(Exception): pass
+    class SeleniumNotAvailableError(Exception): pass
+
+# CDP (Chrome DevTools Protocol) integration - graceful degradation when not available
+try:
+    from webfetcher.fetchers.cdp_fetcher import CDPFetcher, fetch_with_cdp, CDP_AVAILABLE
+    if CDP_AVAILABLE:
+        logging.debug("CDP fetcher available")
+        CDP_INTEGRATION_AVAILABLE = True
+    else:
+        CDP_INTEGRATION_AVAILABLE = False
+except ImportError as e:
+    logging.debug(f"CDP integration not available: {e}")
+    CDP_INTEGRATION_AVAILABLE = False
+    CDP_AVAILABLE = False
+
+# Headless Chrome manager - auto-launch headless Chrome for CDP
+try:
+    from webfetcher.fetchers.headless_manager import ensure_headless_chrome
+    HEADLESS_MANAGER_AVAILABLE = True
+except ImportError:
+    HEADLESS_MANAGER_AVAILABLE = False
+
+# Chrome error handling (Phase 2.3) - enhanced error messages
+from webfetcher.errors.handler import (
+    ChromeDebugError, ChromePortConflictError,
+    ChromePermissionError, ChromeTimeoutError,
+    ChromeLaunchError, ChromeErrorMessages
+)
+
+# Smart routing for SSL problematic domains (Phase 3.5)
+from webfetcher.config.ssl_problematic_domains import should_use_selenium_directly
+
+# Config-Driven Routing System (Task-1) - intelligently route URLs to appropriate fetcher
+try:
+    from webfetcher.routing import RoutingEngine, RoutingDecision
+    routing_engine = RoutingEngine()
+    ROUTING_ENGINE_AVAILABLE = True
+    logging.debug("Config-driven routing system initialized")
+except ImportError as e:
+    logging.debug(f"Routing engine not available: {e}")
+    ROUTING_ENGINE_AVAILABLE = False
+    routing_engine = None
+except Exception as e:
+    logging.warning(f"Failed to initialize routing engine: {e}")
+    ROUTING_ENGINE_AVAILABLE = False
+    routing_engine = None
+
+# Manual Chrome Hybrid Mode (Task 000) - graceful degradation when not available
+try:
+    import yaml
+    from manual_chrome import ManualChromeHelper
+    from manual_chrome.exceptions import (
+        ManualChromeError,
+        ChromeNotFoundError,
+        PortInUseError,
+        AttachmentError,
+        TimeoutError as ManualChromeTimeoutError
+    )
+    MANUAL_CHROME_AVAILABLE = True
+
+    # Load manual Chrome configuration
+    try:
+        manual_chrome_config_path = Path(__file__).parent / "config" / "manual_chrome_config.yaml"
+        with open(manual_chrome_config_path, 'r', encoding='utf-8') as f:
+            manual_chrome_config = yaml.safe_load(f)
+
+        # Check if manual Chrome is enabled in config
+        if manual_chrome_config.get('enabled', False):
+            manual_chrome_helper = ManualChromeHelper(manual_chrome_config)
+            logging.info("Manual Chrome mode enabled and initialized")
+        else:
+            manual_chrome_helper = None
+            logging.debug("Manual Chrome mode is disabled in configuration")
+    except FileNotFoundError:
+        logging.debug("Manual Chrome config not found, feature disabled")
+        manual_chrome_helper = None
+    except Exception as e:
+        logging.warning(f"Failed to initialize manual Chrome: {e}")
+        manual_chrome_helper = None
+
+except ImportError as e:
+    logging.debug(f"Manual Chrome integration not available: {e}")
+    MANUAL_CHROME_AVAILABLE = False
+    manual_chrome_helper = None
+    # Create dummy classes to prevent import errors
+    class ManualChromeHelper: pass
+    class ManualChromeError(Exception): pass
+    class ChromeNotFoundError(Exception): pass
+    class PortInUseError(Exception): pass
+    class AttachmentError(Exception): pass
+    class ManualChromeTimeoutError(Exception): pass
+
+# Parser modules
+import webfetcher.parsing.parser as parsers
+from webfetcher.parsing.parser import (
+    wechat_to_markdown,
+    xhs_to_markdown,
+    generic_to_markdown,
+    AntiBotDetectedError,
+)
+
+# URL Formatter Module
+from webfetcher.utils.url_formatter import insert_dual_url_section
+from webfetcher.parsing.templates import apply_yaml_frontmatter
+
+# Error handler integration (Task 1 Phase 2)
+try:
+    from webfetcher.errors.handler import ErrorClassifier, ErrorReporter, ErrorCategory
+    ERROR_HANDLER_AVAILABLE = True
+except ImportError as e:
+    logging.debug(f"Error handler not available: {e}")
+    ERROR_HANDLER_AVAILABLE = False
+    # Create dummy classes to prevent import errors
+    class ErrorClassifier: pass
+    class ErrorReporter: pass
+    class ErrorCategory: pass
+
+# Error classification system (Task 7 Phase 1)
+try:
+    from webfetcher.errors.classifier import UnifiedErrorClassifier
+    from webfetcher.errors.types import ErrorType, ErrorClassification
+    ERROR_CLASSIFIER_AVAILABLE = True
+except ImportError as e:
+    logging.debug(f"Error classifier not available: {e}")
+    ERROR_CLASSIFIER_AVAILABLE = False
+
+# Safari integration removed - using urllib only
+
+
+# === EMBEDDED DOWNLOADER MODULE ===
+# NOTE: ssl_context_unverified is defined below (after FallbackHTMLParser) as module-level singleton
+
+# Initialize error classifier (Task 7 Phase 1)
+error_classifier = UnifiedErrorClassifier() if ERROR_CLASSIFIER_AVAILABLE else None
+
+
+class SimpleDownloader:
+    def __init__(self):
+        self.downloadable_extensions = {
+            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf',
+            'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp', 'tiff', 'ico',
+            'mp3', 'mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'wav', 'ogg',
+            'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'dmg', 'iso', 'exe', 'msi', 'deb', 'rpm',
+            'xml', 'json', 'csv', 'sql', 'log', 'conf', 'cfg', 'ini', 'yaml', 'yml'
+        }
+    
+    def try_download(self, url, ua, timeout, outdir):
+        # Check if this is a downloadable file based on URL extension
+        parsed_url = urllib.parse.urlparse(url)
+        file_extension = parsed_url.path.lower().split('.')[-1] if '.' in parsed_url.path else ''
+        
+        if file_extension in self.downloadable_extensions:
+            logging.info(f"Detected downloadable file with extension: {file_extension}")
+            
+            # Extract filename from URL
+            filename = parsed_url.path.split('/')[-1] if parsed_url.path else f"download.{file_extension}"
+            if not filename or filename == f".{file_extension}":
+                # Generate filename from domain and timestamp if path is empty
+                domain = parsed_url.hostname or 'unknown'
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{domain}_{timestamp}.{file_extension}"
+            
+            # Sanitize filename for filesystem
+            filename = sanitize_filename(filename)
+            
+            # Ensure unique filename to avoid conflicts
+            outdir = Path(outdir)
+            outdir.mkdir(parents=True, exist_ok=True)
+            base_path = outdir / filename
+            final_path = base_path
+            
+            counter = 1
+            while final_path.exists():
+                name_part, ext_part = filename.rsplit('.', 1) if '.' in filename else (filename, '')
+                if ext_part:
+                    final_path = outdir / f"{name_part}_{counter}.{ext_part}"
+                else:
+                    final_path = outdir / f"{filename}_{counter}"
+                counter += 1
+            
+            try:
+                # Download binary file directly
+                logging.info(f"Downloading file to: {final_path}")
+                
+                # Re-fetch the content as binary data
+                req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept-Language": "zh-CN,zh;q=0.9"})
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context_unverified) as response:
+                    # Write binary data to file
+                    with open(final_path, 'wb') as f:
+                        while True:
+                            chunk = response.read(8192)  # Read in 8KB chunks
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                
+                file_size = final_path.stat().st_size
+                logging.info(f"File downloaded successfully: {final_path} ({file_size} bytes)")
+                print(str(final_path))
+                return True  # Downloaded successfully, skip HTML processing
+                
+            except Exception as e:
+                logging.error(f"Failed to download file: {e}")
+                # Continue with normal HTML processing if download fails
+                logging.info("Falling back to HTML processing")
+        
+        return False  # Not a downloadable file or download failed
+# === END EMBEDDED DOWNLOADER MODULE ===
+
+
+
+@dataclass
+class FetchMetrics:
+    """Tracks metrics for web content fetching operations."""
+    primary_method: str = ""  # urllib/playwright/local_file
+    fallback_method: Optional[str] = None  # selenium (when used as fallback)
+    total_attempts: int = 0
+    fetch_duration: float = 0.0
+    render_duration: float = 0.0
+    ssl_fallback_used: bool = False
+    final_status: str = "unknown"  # success/failed
+    error_message: Optional[str] = None
+
+    # Selenium-specific fields (Phase 2 integration)
+    selenium_wait_time: float = 0.0
+    chrome_connected: bool = False
+    js_detection_used: bool = False
+
+    # Phase 1: Chrome auto-launch tracking
+    chrome_auto_launched: bool = False
+    chrome_launch_message: Optional[str] = None
+
+    # Content validation tracking (采集成功率优化)
+    validation_failures: list = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metrics to dictionary for JSON serialization."""
+        return {
+            'primary_method': self.primary_method,
+            'fallback_method': self.fallback_method,
+            'total_attempts': self.total_attempts,
+            'fetch_duration': round(self.fetch_duration, 3),
+            'render_duration': round(self.render_duration, 3),
+            'ssl_fallback_used': self.ssl_fallback_used,
+            'final_status': self.final_status,
+            'error_message': self.error_message,
+            'selenium_wait_time': round(self.selenium_wait_time, 3),
+            'chrome_connected': self.chrome_connected,
+            'js_detection_used': self.js_detection_used,
+            'chrome_auto_launched': self.chrome_auto_launched,
+            'chrome_launch_message': self.chrome_launch_message,
+            'validation_failures': self.validation_failures,
+        }
+    
+    def get_summary(self) -> str:
+        """Generate a human-readable summary of fetch metrics."""
+        method = self.fallback_method if self.fallback_method else self.primary_method
+        duration = self.fetch_duration + self.render_duration
+        
+        summary = f"Fetched via: {method}"
+        
+        if self.total_attempts > 1:
+            summary += f" | Attempts: {self.total_attempts}"
+        
+        if duration > 0:
+            summary += f" | Duration: {duration:.2f}s"
+        
+        if self.ssl_fallback_used:
+            summary += " | SSL fallback used"
+        
+        # Add Selenium-specific information
+        if self.chrome_connected:
+            summary += " | Chrome session connected"
+        
+        if self.selenium_wait_time > 0:
+            summary += f" | Selenium wait: {self.selenium_wait_time:.2f}s"
+        
+        if self.js_detection_used:
+            summary += " | JS detection used"
+
+        if self.validation_failures:
+            reasons = [f"{f[0]}:{f[1]}" for f in self.validation_failures]
+            summary += f" | Validation issues: {', '.join(reasons)}"
+
+        return summary
+
+
+def create_url_metadata(input_url: str, final_url: str = None,
+                       fetch_mode: str = None) -> dict:
+    """
+    Create URL metadata dictionary for tracking URL resolution.
+
+    Args:
+        input_url: Original URL as provided by user (before normalization)
+        final_url: Final URL after all redirects (None if not yet resolved)
+        fetch_mode: Method used to fetch ('urllib', 'selenium', 'manual_chrome')
+
+    Returns:
+        dict: URL metadata for passing through pipeline
+
+    Example:
+        metadata = create_url_metadata("example.com", "https://example.com/", "urllib")
+    """
+    import datetime
+    return {
+        'input_url': input_url,
+        'final_url': final_url or input_url,  # Fallback to input if no redirect
+        'fetch_date': datetime.datetime.now(),
+        'fetch_mode': fetch_mode or 'unknown'
+    }
+
+
+# === CONTENT VALIDATION ===
+# Inserted by: 采集成功率优化 Batch 1, Task 1
+
+# Anti-bot / block page signatures — checked in <title> + first 2000 chars of <body>
+_ANTIBOT_TITLE_PATTERNS = [
+    # Cloudflare
+    'just a moment', 'attention required', 'checking your browser',
+    # Generic HTTP errors embedded in pages
+    '403 forbidden', 'access denied', '429 too many requests',
+    '503 service temporarily unavailable', 'request blocked',
+    # Chinese WAF / anti-bot
+    '百度安全验证', '安全验证', '访问验证',
+]
+
+_ANTIBOT_BODY_PATTERNS = [
+    # Cloudflare / CDN challenge
+    'cf-browser-verification', '_cf_chl_opt', 'challenges.cloudflare.com',
+    'cf-turnstile', 'jschl_vc', 'jschl_answer',
+    # hCaptcha / reCAPTCHA / GeeTest
+    'hcaptcha.com', 'h-captcha', 'recaptcha', 'google.com/recaptcha',
+    'geetest', 'gt_captcha',
+    # Akamai / AWS WAF
+    'awswaf', 'akamaized.net',
+    # Tencent WAF / captcha
+    'captcha.qq.com', 'TencentCaptcha', 'tgateway',
+    # Chinese anti-bot phrases (body head only)
+    '验证码', '环境异常', '访问频繁', '访问过于频繁', '请求异常',
+    '操作过于频繁', '系统检测到异常', '当前访问疑似机器行为',
+    '请完成安全验证', '完成验证后即可继续访问',
+    '请在微信客户端打开', 'IP被封禁', 'IP被限制',
+    '网络不给力',
+    # Login wall (only when combined with short body)
+    '请登录', 'login required', 'sign in to continue', 'please log in',
+    # English anti-bot
+    'access denied', 'please verify you are a human',
+    'blocked', 'robot check',
+]
+
+# Minimum body text thresholds
+_BODY_TEXT_CERTAINLY_INVALID = 50      # < 50 chars: definitely invalid
+_BODY_TEXT_SUSPICIOUS = 500            # 50-500 chars: suspicious, needs keyword match
+
+
+def _extract_title_and_body_head(html: str) -> tuple[str, str, int]:
+    """Fast extraction of title text and first 2000 chars of body text.
+
+    Uses regex for speed — avoids full DOM parse for the common (valid) case.
+
+    Returns:
+        (title_lower, body_head_lower, body_text_length_estimate)
+    """
+    # Extract <title>
+    title = ''
+    m = re.search(r'<title[^>]*>(.*?)</title>', html[:5000], re.IGNORECASE | re.DOTALL)
+    if m:
+        title = m.group(1).strip().lower()
+
+    # Rough body text: strip tags from first 8000 chars of <body>
+    body_start = html.lower().find('<body')
+    if body_start >= 0:
+        body_raw = html[body_start:body_start + 8000]
+        # Remove <script> and <style> blocks
+        body_clean = re.sub(r'<script[^>]*>.*?</script>', '', body_raw, flags=re.DOTALL | re.IGNORECASE)
+        body_clean = re.sub(r'<style[^>]*>.*?</style>', '', body_clean, flags=re.DOTALL | re.IGNORECASE)
+        # Strip remaining tags
+        body_text = re.sub(r'<[^>]+>', ' ', body_clean)
+        body_text = re.sub(r'\s+', ' ', body_text).strip()
+    else:
+        body_text = ''
+
+    body_text_len = len(body_text)
+    body_head = body_text[:2000].lower()
+
+    return title, body_head, body_text_len
+
+
+def validate_fetched_html(html: str, url: str) -> tuple[bool, str]:
+    """Validate fetched HTML content quality.
+
+    Checks for empty content, anti-bot pages, login walls, and SPA shells.
+    Uses dual-criteria: keywords alone don't trigger failure on long pages.
+
+    Args:
+        html: Raw HTML string from fetcher
+        url: The URL that was fetched (for context-aware checks)
+
+    Returns:
+        (is_valid, reason) — reason is '' when valid, descriptive string when invalid
+    """
+    try:
+        # 1. Empty or whitespace-only
+        if not html or not html.strip():
+            return False, 'empty_content'
+
+        # 2. Fast extraction (regex-based, no DOM)
+        title, body_head, body_text_len = _extract_title_and_body_head(html)
+
+        # 3. Title-based anti-bot detection (high confidence, check before length)
+        for pattern in _ANTIBOT_TITLE_PATTERNS:
+            if pattern in title:
+                return False, f'antibot_title:{pattern}'
+
+        # 4. Body-head keyword detection — when body is short (dual criteria)
+        #    Check keywords BEFORE the too_short fallback so we get specific reasons
+        if body_text_len < _BODY_TEXT_SUSPICIOUS:
+            for pattern in _ANTIBOT_BODY_PATTERNS:
+                if pattern in body_head:
+                    return False, f'antibot_body:{pattern}'
+
+        # 5. Certainly invalid: body text extremely short (no keyword matched above)
+        if body_text_len < _BODY_TEXT_CERTAINLY_INVALID:
+            # Check for SPA shell markers (need CDP rendering, not an error per se)
+            if any(marker in html for marker in ['id="app"', 'id="root"', 'id="__next"',
+                                                   'id="__nuxt"', 'data-reactroot']):
+                return False, 'spa_shell'
+            return False, 'too_short'
+
+        # 6. WeChat-specific: no js_content div on WeChat pages
+        if 'mp.weixin.qq.com' in url:
+            if 'id="js_content"' not in html and "id='js_content'" not in html:
+                if any(kw in html for kw in ['环境异常', '完成验证后即可继续访问', '去验证']):
+                    return False, 'wechat_antibot'
+                # WeChat page without js_content = needs JS rendering
+                return False, 'wechat_needs_rendering'
+
+        # Valid
+        return True, ''
+
+    except Exception as e:
+        # Validation must never block the fetch pipeline
+        logging.warning(f"Content validation error (allowing through): {e}")
+        return True, 'validation_error'
+
+
+def add_metrics_to_markdown(md_content: str, metrics: FetchMetrics, template_name: Optional[str] = None) -> str:
+    """Add fetch metrics to markdown content as HTML comment and footer."""
+    # Add HTML comment at the top with detailed metrics
+    lite_mode = getattr(metrics, '_lite_mode', False)
+    mode_line = f"\n  Mode: lite" if lite_mode else ""
+    blocked_line = f"\n  Resources Blocked: image,stylesheet,font,media" if lite_mode else ""
+    detailed_comment = f"""<!-- Fetch Metrics:
+  Method: {metrics.primary_method}
+  Fallback: {metrics.fallback_method or 'None'}{mode_line}{blocked_line}
+  Attempts: {metrics.total_attempts}
+  Fetch Duration: {metrics.fetch_duration:.3f}s
+  Render Duration: {metrics.render_duration:.3f}s
+  SSL Fallback: {metrics.ssl_fallback_used}
+  Status: {metrics.final_status}
+  Error: {metrics.error_message or 'None'}
+-->
+
+"""
+    
+    # Add visible footer with summary
+    footer = f"\n\n---\n\n*{metrics.get_summary()}"
+    if template_name:
+        footer += f" | Template: {template_name}"
+    footer += "*\n"
+    
+    return detailed_comment + md_content + footer
+# BeautifulSoup导入移至动态导入机制
+
+def is_url_encoded(text: str) -> bool:
+    """
+    Check if a text string is already URL-encoded.
+    
+    Args:
+        text: String to check for URL encoding
+        
+    Returns:
+        bool: True if text appears to be URL-encoded, False otherwise
+    """
+    try:
+        # If decoding changes the text, it was encoded
+        # Also check for common encoded patterns
+        return (urllib.parse.unquote(text, errors='strict') != text or 
+                '%' in text and any(c in text for c in ['%20', '%2F', '%3A']))
+    except:
+        return False
+
+def validate_and_encode_url(url: str) -> str:
+    """
+    Validate URL and ensure safe encoding for HTTP requests.
+
+    Properly handles Unicode characters (e.g., Chinese), spaces, and already-encoded URLs.
+    Converts IRI (Internationalized Resource Identifier) to proper URI format.
+    Supports file:// URLs for local file access.
+
+    Args:
+        url: URL to validate and encode (can contain Unicode or spaces)
+
+    Returns:
+        str: Safely encoded URL ready for HTTP requests, or file:// URL for local files
+
+    Raises:
+        ValueError: If URL is invalid or contains unsafe patterns
+
+    Examples:
+        >>> validate_and_encode_url('https://zh.wikipedia.org/wiki/中文')
+        'https://zh.wikipedia.org/wiki/%E4%B8%AD%E6%96%87'
+        >>> validate_and_encode_url('https://example.com/path with spaces')
+        'https://example.com/path%20with%20spaces'
+        >>> validate_and_encode_url('file:///tmp/file.html')
+        'file:///tmp/file.html'
+    """
+    if not url or not isinstance(url, str):
+        raise ValueError("URL must be a non-empty string")
+
+    url = url.strip()
+    if not url:
+        raise ValueError("URL cannot be empty after stripping whitespace")
+
+    # 智能URL提取：从包含其他文本的字符串中提取URL
+    # 例如："《我爱我家》 http://xhslink.com/xxx 复制后打开" -> "http://xhslink.com/xxx"
+    # 只处理明显不是纯URL的输入（不以http(s)://开头）
+    import re
+
+    if not url.startswith(('http://', 'https://', 'file://')):
+        # 不是标准URL开头，可能是混合文本，尝试提取URL
+        url_pattern = r'https?://[^\s]+'
+        url_matches = re.findall(url_pattern, url)
+
+        if url_matches:
+            extracted_url = url_matches[0].rstrip('.,;:!?）)')  # 移除末尾的标点
+            logging.info(f"📎 从文本中提取URL: '{url}' -> '{extracted_url}'")
+            url = extracted_url
+
+    try:
+        # Parse URL to validate structure
+        parsed = urllib.parse.urlparse(url)
+
+        # Support file:// protocol for local file access
+        if parsed.scheme == 'file':
+            # file:// URLs don't need netloc, just a valid path
+            if not parsed.path:
+                raise ValueError(f"file:// URL missing path: {url}")
+            # Return file:// URL as-is (will be handled specially in main)
+            logging.info(f"Detected file:// URL for local file: {parsed.path}")
+            return url
+
+        # Basic validation for http/https URLs
+        if not parsed.scheme:
+            raise ValueError(f"URL missing scheme: {url}")
+        if not parsed.netloc:
+            raise ValueError(f"URL missing network location: {url}")
+        
+        # Check for potentially problematic characters in shell context
+        shell_special_chars = ['`', '$', '\\', '"', "'"]
+        for char in shell_special_chars:
+            if char in url:
+                logging.warning(f"URL contains shell special character '{char}': {url}")
+        
+        # Encode path component (handles Unicode and spaces)
+        if parsed.path:
+            # Split path into segments to handle each separately
+            path_segments = parsed.path.split('/')
+            encoded_segments = []
+            
+            for segment in path_segments:
+                if segment:  # Skip empty segments from leading/trailing slashes
+                    if not is_url_encoded(segment):
+                        # Encode Unicode and special characters, but preserve slashes
+                        encoded_segment = urllib.parse.quote(segment, safe='')
+                        encoded_segments.append(encoded_segment)
+                    else:
+                        # Already encoded, keep as-is
+                        encoded_segments.append(segment)
+                else:
+                    encoded_segments.append(segment)
+            
+            encoded_path = '/'.join(encoded_segments)
+        else:
+            encoded_path = parsed.path
+        
+        # Handle query parameters
+        if parsed.query:
+            # Parse and re-encode to ensure consistency
+            query_params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            encoded_query = urllib.parse.urlencode(query_params)
+        else:
+            encoded_query = parsed.query
+        
+        # Handle fragment (anchor)
+        if parsed.fragment:
+            if not is_url_encoded(parsed.fragment):
+                encoded_fragment = urllib.parse.quote(parsed.fragment, safe='')
+            else:
+                encoded_fragment = parsed.fragment
+        else:
+            encoded_fragment = parsed.fragment
+        
+        # Reconstruct the URL with encoded components
+        encoded_url = urllib.parse.urlunparse((
+            parsed.scheme,
+            parsed.netloc,  # netloc (domain) stays as-is for international domains
+            encoded_path,
+            parsed.params,  # rarely used, keep as-is
+            encoded_query,
+            encoded_fragment
+        ))
+        
+        if encoded_url != url:
+            logging.debug(f"URL encoded: {url} -> {encoded_url}")
+        
+        return encoded_url
+        
+    except Exception as e:
+        raise ValueError(f"URL validation failed for '{url}': {e}")
+
+
+def get_beautifulsoup_parser():
+    """动态导入BeautifulSoup，如果不可用则返回None"""
+    try:
+        from bs4 import BeautifulSoup
+        return BeautifulSoup
+    except ImportError:
+        return None
+
+# HTML解析降级支持
+from html.parser import HTMLParser
+
+class ContentFilter:
+    """Generic content filtering system for noise removal from any website"""
+    
+    def __init__(self, filter_level='safe'):
+        self.filter_level = filter_level
+        self.removed_elements = []
+        
+    def filter_content(self, soup):
+        """Apply content filtering based on filter level"""
+        if not soup:
+            return soup
+            
+        self.removed_elements = []
+        
+        if self.filter_level == 'none':
+            return soup
+            
+        # Safe filters (default) - remove obvious noise
+        if self.filter_level in ['safe', 'moderate', 'aggressive']:
+            self._remove_scripts_and_styles(soup)
+            self._remove_hidden_elements(soup)
+            self._remove_ads_and_popups(soup)
+            
+        # Moderate filters - also remove navigation
+        if self.filter_level in ['moderate', 'aggressive']:
+            self._remove_navigation_elements(soup)
+            
+        # Aggressive filters - remove all identified noise
+        if self.filter_level == 'aggressive':
+            self._remove_metadata_elements(soup)
+            self._remove_social_elements(soup)
+            self._clean_attributes(soup)
+            
+        return soup
+    
+    def _remove_scripts_and_styles(self, soup):
+        """Remove script and style tags"""
+        for tag in soup.find_all(['script', 'style', 'noscript']):
+            self.removed_elements.append(f"script/style: {tag.name}")
+            tag.decompose()
+    
+    def _remove_hidden_elements(self, soup):
+        """Remove visually hidden elements with precise class matching
+
+        Phase 2 Fix: Changed from substring matching to exact word matching.
+        Previously matched any class containing "hidden" (e.g., "mx-auto-hidden"),
+        now only matches complete class names like "hidden", "visually-hidden", etc.
+        """
+        # Semantic HTML5 tags white-list: NEVER delete these
+        semantic_tags = {'body', 'html', 'main', 'article', 'section',
+                        'nav', 'header', 'footer', 'aside'}
+
+        # Elements with display:none or visibility:hidden
+        for element in soup.find_all(style=lambda x: x and ('display:none' in x.replace(' ', '') or 'visibility:hidden' in x.replace(' ', ''))):
+            # Protect semantic tags
+            if element.name in semantic_tags:
+                continue
+            self.removed_elements.append(f"hidden: {element.name}")
+            element.decompose()
+
+        # Common hidden classes - Phase 2 Fix: exact class name matching only
+        # Only match standalone "hidden" class, not Tailwind utility classes like "overflow-hidden"
+        hidden_classes = [
+            'hidden',           # Plain hidden class
+            'sr-only',          # Screen reader only
+            'screen-reader-only',
+            'visually-hidden',  # Visually hidden
+            'invisible',        # Invisible class
+            'hide',             # Alternative hidden class
+            'd-none'            # Bootstrap hidden class
+        ]
+
+        # Build list first to avoid modification during iteration
+        elements_to_remove = []
+        for element in soup.find_all():
+            if not element or not hasattr(element, 'get'):
+                continue
+
+            elem_classes = element.get('class', [])
+            if not elem_classes:
+                continue
+
+            # Check if element has any exact hidden class (not as substring)
+            has_hidden_class = any(cls in hidden_classes for cls in elem_classes)
+
+            if has_hidden_class:
+                # Protect semantic tags
+                if element.name in semantic_tags:
+                    continue
+                elements_to_remove.append(element)
+
+        # Remove collected elements
+        for element in elements_to_remove:
+            self.removed_elements.append(f"hidden class: {element.name}")
+            element.decompose()
+    
+    def _remove_ads_and_popups(self, soup):
+        """Remove advertisement and popup elements with precise selectors
+
+        Phase 2 Fix: Replaced broad selectors like '[class*="ad"]' which incorrectly
+        matched semantic classes like "antialiased" (used by Tailwind CSS), causing
+        entire body tags to be removed on 30-50% of modern websites.
+
+        Now using precise selectors that match exact ad patterns while protecting
+        semantic HTML5 tags (body, main, article, etc.).
+        """
+        # Precise ad selectors - Phase 2 Fix
+        # Only match explicit ad-related patterns, not substrings in unrelated classes
+        ad_selectors = [
+            # ID selectors: precise prefix/suffix matching
+            '[id^="ad-"]', '[id^="ad_"]', '[id$="-ad"]', '[id$="_ad"]',
+            '[id="ad"]', '[id="ads"]', '[id="advertisement"]',
+
+            # Class selectors: complete class names only
+            '.ad', '.ads', '.ad-container', '.ad-wrapper',
+            '.advertisement', '.adsbygoogle', '.ad-slot', '.ad-banner',
+            '.ad-unit', '.ad-content', '.ad-box', '.ad-space',
+
+            # Common ad networks
+            '.google-ad', '.amazon-ad', '.facebook-ad',
+
+            # Explicit banner and popup patterns (must contain both keywords)
+            '[id*="banner"][id*="ad"]',
+            '[class*="popup"][class*="modal"]',
+
+            # Promotional and sponsored content
+            '.promo', '.promo-banner', '.sponsored', '.sponsored-content'
+        ]
+
+        # Semantic HTML5 tags white-list: NEVER delete these
+        semantic_tags = {'body', 'html', 'main', 'article', 'section',
+                        'nav', 'header', 'footer', 'aside'}
+
+        for selector in ad_selectors:
+            try:
+                for element in soup.select(selector):
+                    # CRITICAL: Protect semantic tags (Phase 2 Fix)
+                    if element.name in semantic_tags:
+                        continue
+
+                    # Protect main content areas (preserve original logic)
+                    elem_classes = ' '.join(element.get('class', [])).lower()
+                    elem_id = element.get('id', '').lower()
+
+                    protected_keywords = ['main', 'content', 'article', 'post', 'entry']
+                    if any(kw in elem_classes or kw in elem_id
+                           for kw in protected_keywords):
+                        continue
+
+                    # Safe to remove: not semantic, not main content
+                    self.removed_elements.append(f"ad: {element.name}")
+                    element.decompose()
+            except Exception as e:
+                # Silently continue on selector errors
+                continue
+    
+    def _remove_navigation_elements(self, soup):
+        """Remove navigation, header, footer elements"""
+        nav_tags = ['nav', 'header', 'footer', 'aside']
+        for tag in nav_tags:
+            for element in soup.find_all(tag):
+                self.removed_elements.append(f"navigation: {element.name}")
+                element.decompose()
+        
+        # Common navigation classes
+        nav_classes = ['nav', 'navigation', 'menu', 'sidebar', 'breadcrumb', 'pagination']
+        for class_name in nav_classes:
+            for element in soup.find_all(class_=lambda x: x and any(cls for cls in x if class_name in cls.lower())):
+                self.removed_elements.append(f"nav class: {element.name}")
+                element.decompose()
+    
+    def _remove_metadata_elements(self, soup):
+        """Remove metadata and tracking elements"""
+        # Meta tags not needed for content
+        for meta in soup.find_all('meta'):
+            if meta.get('name') not in ['description', 'author', 'keywords']:
+                meta.decompose()
+        
+        # Comments
+        from bs4 import Comment
+        comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+        for comment in comments:
+            comment.extract()
+            
+        # Tracking and analytics
+        tracking_classes = ['analytics', 'tracking', 'pixel', 'beacon']
+        for class_name in tracking_classes:
+            for element in soup.find_all(class_=lambda x: x and any(cls for cls in x if class_name in cls.lower())):
+                element.decompose()
+    
+    def _remove_social_elements(self, soup):
+        """Remove social media widgets and share buttons"""
+        social_classes = ['social', 'share', 'facebook', 'twitter', 'linkedin', 'pinterest']
+        for class_name in social_classes:
+            for element in soup.find_all(class_=lambda x: x and any(cls for cls in x if class_name in cls.lower())):
+                self.removed_elements.append(f"social: {element.name}")
+                element.decompose()
+    
+    def _clean_attributes(self, soup):
+        """Remove unnecessary attributes to clean up HTML"""
+        for element in soup.find_all(True):
+            # Keep only essential attributes
+            essential_attrs = ['href', 'src', 'alt', 'title', 'id']
+            attrs_to_remove = [attr for attr in element.attrs.keys() if attr not in essential_attrs]
+            for attr in attrs_to_remove:
+                del element.attrs[attr]
+    
+    def get_filter_stats(self):
+        """Return filtering statistics"""
+        stats = {}
+        for item in self.removed_elements:
+            category = item.split(':')[0]
+            stats[category] = stats.get(category, 0) + 1
+        return stats
+
+
+class NavigationFilter:
+    """Specialized filter for navigation and structural elements"""
+    
+    @staticmethod
+    def remove_navigation_noise(soup):
+        """Remove common navigation patterns that interfere with content"""
+        if not soup:
+            return soup
+            
+        removed_count = 0
+        
+        # Remove skip links (accessibility)
+        for skip_link in soup.find_all('a', href=lambda x: x and x.startswith('#')):
+            if 'skip' in skip_link.get_text().lower():
+                skip_link.decompose()
+                removed_count += 1
+        
+        # Remove empty navigation containers
+        for nav in soup.find_all(['nav', 'div', 'section'], class_=lambda x: x and 'nav' in ' '.join(x).lower()):
+            if not nav.get_text().strip() or len(nav.get_text().strip()) < 10:
+                nav.decompose()
+                removed_count += 1
+        
+        # Remove breadcrumb trails (often noise in conversion)
+        for breadcrumb in soup.find_all(attrs={'aria-label': lambda x: x and 'breadcrumb' in x.lower()}):
+            breadcrumb.decompose()
+            removed_count += 1
+            
+        return soup, removed_count
+
+
+class FallbackHTMLParser(HTMLParser):
+    """基础HTML解析器作为BeautifulSoup的降级方案"""
+    
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self.in_title = False
+        self.content_parts = []
+        self.current_text = ""
+        self.in_script = False
+        self.in_style = False
+        self.meta_attrs = []
+        
+    def handle_starttag(self, tag, attrs):
+        if tag == 'title':
+            self.in_title = True
+        elif tag in ['script', 'style']:
+            if tag == 'script':
+                self.in_script = True
+            else:
+                self.in_style = True
+        elif tag == 'meta':
+            attr_dict = dict(attrs)
+            self.meta_attrs.append(attr_dict)
+        elif tag in ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'li']:
+            if self.current_text.strip():
+                self.content_parts.append(self.current_text.strip())
+                self.current_text = ""
+                
+    def handle_endtag(self, tag):
+        if tag == 'title':
+            self.in_title = False
+        elif tag in ['script', 'style']:
+            if tag == 'script':
+                self.in_script = False
+            else:
+                self.in_style = False
+        elif tag in ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'li']:
+            if self.current_text.strip():
+                self.content_parts.append(self.current_text.strip())
+                self.current_text = ""
+                
+    def handle_data(self, data):
+        if self.in_title:
+            self.title += data.strip()
+        elif not self.in_script and not self.in_style:
+            self.current_text += data
+            
+    def get_parsed_content(self):
+        if self.current_text.strip():
+            self.content_parts.append(self.current_text.strip())
+        return {
+            'title': self.title or '未命名',
+            'content_parts': self.content_parts,
+            'meta_attrs': self.meta_attrs
+        }
+
+def extract_with_htmlparser(html_content: str, url: str) -> tuple[str, str, dict]:
+    """使用Python内置HTMLParser进行基础解析"""
+    parser = FallbackHTMLParser()
+    try:
+        parser.feed(html_content)
+    except Exception as e:
+        logging.warning(f"HTMLParser解析出错: {e}")
+        return datetime.datetime.now().strftime('%Y-%m-%d'), f"# 解析失败\n\n无法解析页面内容: {str(e)}", {'page_type': 'parse_error'}
+    
+    parsed = parser.get_parsed_content()
+    
+    # 构建markdown内容
+    content_parts = [f"# {parsed['title']}\n"]
+    
+    # 添加meta信息
+    if parsed['meta_attrs']:
+        content_parts.append("## 页面元数据\n")
+        for meta in parsed['meta_attrs']:
+            if meta.get('name'):
+                content_parts.append(f"- {meta.get('name')}: {meta.get('content', '')}")
+            elif meta.get('property'):
+                content_parts.append(f"- {meta.get('property')}: {meta.get('content', '')}")
+    
+    # 添加主要内容
+    if parsed['content_parts']:
+        content_parts.append("\n## 页面内容\n")
+        for part in parsed['content_parts']:
+            if part.strip():
+                content_parts.append(part.strip() + "\n")
+    
+    markdown_content = '\n'.join(content_parts)
+    date_only = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+    metadata = {
+        'page_type': 'basic_html',
+        'parser_used': 'HTMLParser',
+        'content_sections': len(parsed['content_parts'])
+    }
+    
+    return date_only, markdown_content, metadata
+
+# Create an SSL context that doesn't verify certificates for legacy sites
+ssl_context_unverified = ssl.create_default_context()
+ssl_context_unverified.check_hostname = False
+ssl_context_unverified.verify_mode = ssl.CERT_NONE
+# Allow legacy server connect for older SSL implementations
+try:
+    ssl_context_unverified.options |= ssl.OP_LEGACY_SERVER_CONNECT
+except AttributeError:
+    pass  # Option might not be available in older OpenSSL versions
+
+# Multi-page document support constants
+MAX_PAGINATION_DEPTH = 5
+
+# Site crawling configuration
+MAX_CRAWL_DEPTH = 10  # Absolute maximum to prevent infinite recursion
+MAX_CRAWL_PAGES = 1000  # Absolute maximum pages (increased for larger documentation sites)
+DEFAULT_CRAWL_DELAY = 0.5  # Polite crawling delay
+
+# Memory protection constants
+MAX_PAGE_SIZE = 10 * 1024 * 1024  # 10MB limit for individual pages
+
+# Smart URL filtering constants
+BINARY_EXTENSIONS = {'.pdf', '.zip', '.tar', '.gz', '.rar', '.7z', '.exe', '.dmg', '.iso'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp'}
+VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv'}
+AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'}
+API_PATTERNS = {'/api/', '/rest/', '/graphql', '.json', '.xml', '.rss'}
+BUILD_PATTERNS = {'/node_modules/', '/dist/', '/build/', '/.git/', '/target/',
+                  '/_next/', '/_nuxt/', '/.next/', '/static/'}
+
+# Retry configuration constants  
+MAX_RETRIES = 3
+BASE_DELAY = 1.0  # Base delay in seconds (1s, 2s, 4s progression)
+MAX_JITTER = 0.1  # Add small random jitter to prevent thundering herd
+
+# Define which exceptions and HTTP status codes are retryable
+RETRYABLE_EXCEPTIONS = (
+    urllib.error.URLError,           # DNS resolution, connection refused
+    http_client.RemoteDisconnected,  # Server closed connection unexpectedly
+    http_client.BadStatusLine,       # Malformed HTTP response
+    ConnectionResetError,            # Connection reset by peer
+    TimeoutError,                    # Socket timeout
+    OSError,                        # OS-level network errors
+)
+
+RETRYABLE_HTTP_STATUS_CODES = {
+    429,  # Too Many Requests (rate limiting)
+    500,  # Internal Server Error
+    502,  # Bad Gateway
+    503,  # Service Unavailable
+    504,  # Gateway Timeout
+    520, 521, 522, 523, 524,  # CloudFlare errors
+}
+
+
+def setup_logging(verbose: bool = False):
+    level = logging.INFO if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+
+def sanitize_filename(name: str) -> str:
+    invalid = set('/\\:*?"<>|\n\r\t')
+    name = ''.join(ch if ch not in invalid else ' ' for ch in name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:160]
+
+
+def normalize_media_url(u: str, base_url: str = None) -> str:
+    """
+    Normalize media URL to absolute URL.
+
+    Args:
+        u: Media URL (can be absolute, protocol-relative, or relative)
+        base_url: Base URL to resolve relative URLs against
+
+    Returns:
+        Normalized absolute URL
+    """
+    if not u:
+        return u
+    u = u.strip()
+
+    # Already absolute URL (http:// or https://)
+    if u.startswith(('http://', 'https://')):
+        return u
+
+    # Protocol-relative URL (//example.com/image.jpg)
+    if u.startswith('//'):
+        return 'https:' + u
+
+    # Absolute path (/path/to/image.jpg)
+    if u.startswith('/'):
+        if base_url:
+            # Extract domain from base_url
+            parsed = urllib.parse.urlparse(base_url)
+            return f"{parsed.scheme}://{parsed.netloc}{u}"
+        else:
+            # Fallback to https: prefix for protocol-relative
+            return 'https:' + u
+
+    # Relative path (image.jpg or path/image.jpg)
+    if base_url:
+        # Use urljoin to properly handle relative paths
+        return urllib.parse.urljoin(base_url, u)
+    else:
+        # No base URL provided, return as-is
+        return u
+
+
+
+def should_retry_exception(exc: Exception) -> bool:
+    """Determine if an exception warrants a retry attempt."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.status in RETRYABLE_HTTP_STATUS_CODES
+    return isinstance(exc, RETRYABLE_EXCEPTIONS)
+
+def calculate_backoff_delay(attempt: int, base_delay: float = BASE_DELAY) -> float:
+    """Calculate exponential backoff delay with jitter."""
+    delay = base_delay * (2 ** attempt)  # 1s, 2s, 4s
+    jitter = random.uniform(0, MAX_JITTER)
+    return delay + jitter
+
+
+def ensure_chrome_debug(config: Optional[Dict[str, Any]] = None, force_mode: bool = False) -> tuple[bool, str]:
+    """
+    Ensure Chrome debug session is running by calling ensure-chrome-debug.sh.
+
+    Phase 1: Core Integration - Chrome auto-launch before Selenium initialization.
+    Phase 2: Enhanced error handling with specific exceptions and user-friendly messages.
+
+    This function integrates the existing Chrome debug health check and launch scripts
+    with enhanced error reporting.
+
+    Args:
+        config: Optional configuration dictionary (not used currently, reserved for future)
+        force_mode: If True, skip full health check and only verify port (default: False)
+
+    Returns:
+        tuple[bool, str]: (success, message)
+            - success: True if Chrome is running and healthy, False otherwise
+            - message: Status message or error description
+
+    Raises:
+        ChromePortConflictError: When Chrome debug port is already in use (returncode 1)
+        ChromePermissionError: When permission denied for Chrome operations (returncode 3)
+        ChromeTimeoutError: When Chrome health check times out (subprocess.TimeoutExpired)
+        ChromeLaunchError: For other Chrome startup failures (returncode 2 or other)
+
+    Return code mapping from ensure-chrome-debug.sh:
+        0 = Chrome instance healthy or recovery successful
+        1 = Port conflict / Recovery failed
+        2 = Parameter error
+        3 = Permission error
+        4 = Timeout error
+    """
+    import subprocess
+    import os
+
+  
+    try:
+        timeout = int(os.environ.get('WF_CHROME_TIMEOUT',
+                                     config.get('chrome', {}).get('health_check_timeout', 30) if config else 30))
+        # Validate range: 5-300 seconds
+        if not (5 <= timeout <= 300):
+            logging.warning(f"Invalid timeout value {timeout}, using default 30 seconds")
+            timeout = 30
+        logging.info(f"Using Chrome health check timeout: {timeout} seconds")
+    except (ValueError, TypeError):
+        logging.warning("Invalid WF_CHROME_TIMEOUT value, using default 30 seconds")
+        timeout = 30
+
+  
+    if force_mode:
+        logging.info("Force mode enabled - skipping full health check")
+        # Quick port check only
+        try:
+            import urllib.request
+            chrome_port = config.get('chrome', {}).get('debug_port', 9222) if config else 9222
+            url = f"http://localhost:{chrome_port}/json/version"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    logging.info("Chrome debug port is responsive (force mode)")
+                    return (True, "Chrome session verified (force mode)")
+        except Exception as e:
+            logging.warning(f"Force mode port check failed: {e}, will attempt normal startup")
+            # Fall through to normal startup if port check fails
+
+    # Get script directory (where webfetcher.py is located)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    ensure_script = os.path.join(script_dir, 'config', 'ensure-chrome-debug.sh')
+
+    # Check if script exists
+    if not os.path.exists(ensure_script):
+        error_msg = f"Chrome debug script not found: {ensure_script}"
+        logging.error(error_msg)
+        raise ChromeLaunchError(
+            error_msg,
+            error_code=127,
+            guidance=ChromeErrorMessages.get_message('launch_failed', error_details=error_msg)
+        )
+
+  
+    def quick_chrome_check(port=9222):
+        """
+        Quick check if Chrome debug session is already running and healthy.
+        Returns True if Chrome is responding, False otherwise.
+        """
+        try:
+            import urllib.request
+            import json
+            url = f"http://localhost:{port}/json/version"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    if 'Browser' in data and 'Chrome' in data['Browser']:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    # Quick check for existing session before running full health check
+    logging.info("Checking for existing Chrome debug session...")
+    chrome_port = config.get('chrome', {}).get('debug_port', 9222) if config else 9222
+    if quick_chrome_check(chrome_port):
+        logging.info("Existing Chrome session detected and healthy - skipping full health check")
+        return (True, "Chrome session reused (quick check)")
+
+    try:
+        # Run the ensure-chrome-debug.sh script
+        logging.debug(f"Calling Chrome debug health check: {ensure_script}")
+        result = subprocess.run(
+            [ensure_script],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        # Parse return code and raise specific exceptions
+        if result.returncode == 0:
+            # Success - Chrome is running and healthy
+            success_msg = "Chrome debug session is healthy"
+            logging.info(success_msg)
+            return True, success_msg
+
+        elif result.returncode == 1:
+            # Port conflict or recovery failed
+            # Check stderr to determine if it's a port conflict
+            stderr_lower = result.stderr.lower() if result.stderr else ""
+            if "port" in stderr_lower or "9222" in stderr_lower or "address already in use" in stderr_lower:
+                # Port conflict detected
+                port = 9222  # Default port
+                diagnostic_info = result.stderr.strip() if result.stderr else "Port already in use"
+                guidance = ChromeErrorMessages.get_message(
+                    'port_conflict',
+                    port=port,
+                    diagnostic_info=diagnostic_info
+                )
+                raise ChromePortConflictError(
+                    f"Chrome debug port {port} conflict",
+                    error_code=1,
+                    guidance=guidance
+                )
+            else:
+                # General recovery failure
+                error_details = result.stderr.strip() if result.stderr else "Chrome recovery failed"
+                guidance = ChromeErrorMessages.get_message('launch_failed', error_details=error_details)
+                raise ChromeLaunchError(
+                    "Chrome debug session recovery failed",
+                    error_code=1,
+                    guidance=guidance
+                )
+
+        elif result.returncode == 3:
+            # Permission error - macOS specific
+            error_details = result.stderr.strip() if result.stderr else "Permission denied"
+            guidance = ChromeErrorMessages.get_message('permission')
+            raise ChromePermissionError(
+                "Permission error accessing Chrome debug session",
+                error_code=3,
+                guidance=guidance
+            )
+
+        elif result.returncode == 4:
+            # Timeout error from script
+            guidance = ChromeErrorMessages.get_message('timeout', timeout=timeout)
+            raise ChromeTimeoutError(
+                f"Chrome failed to start within {timeout} seconds",
+                error_code=4,
+                guidance=guidance
+            )
+
+        elif result.returncode == 2:
+            # Parameter error
+            error_details = result.stderr.strip() if result.stderr else "Parameter error"
+            guidance = ChromeErrorMessages.get_message('launch_failed', error_details=error_details)
+            raise ChromeLaunchError(
+                "Chrome debug script parameter error",
+                error_code=2,
+                guidance=guidance
+            )
+
+        else:
+            # Unknown error code
+            error_details = f"Unexpected return code {result.returncode}"
+            if result.stderr:
+                error_details += f": {result.stderr.strip()}"
+            guidance = ChromeErrorMessages.get_message('launch_failed', error_details=error_details)
+            raise ChromeLaunchError(
+                f"Chrome debug health check failed with code {result.returncode}",
+                error_code=result.returncode,
+                guidance=guidance
+            )
+
+    except subprocess.TimeoutExpired:
+        # Timeout during subprocess execution
+        guidance = ChromeErrorMessages.get_message('timeout', timeout=timeout)
+        raise ChromeTimeoutError(
+            f"Chrome debug health check timed out after {timeout} seconds",
+            error_code=124,  # Standard timeout exit code
+            guidance=guidance
+        )
+
+    except ChromeDebugError:
+        # Re-raise Chrome-specific errors
+        raise
+
+    except Exception as e:
+        # Catch-all for unexpected errors
+        error_msg = f"Failed to run Chrome debug health check: {e}"
+        logging.error(error_msg)
+        guidance = ChromeErrorMessages.get_message('launch_failed', error_details=str(e))
+        raise ChromeLaunchError(
+            error_msg,
+            error_code=1,
+            guidance=guidance
+        )
+
+
+def _determine_fetcher_via_routing(url: str) -> Optional[str]:
+    """
+    Determine which fetcher to use based on routing configuration.
+
+    This replaces hardcoded routing logic with configuration-driven decisions.
+
+    Args:
+        url: Target URL to fetch
+
+    Returns:
+        Fetcher name ('urllib', 'selenium', 'manual_chrome') or None if routing disabled
+    """
+    if not ROUTING_ENGINE_AVAILABLE or routing_engine is None:
+        return None
+
+    try:
+        decision = routing_engine.evaluate(url)
+
+        # Log the routing decision
+        logging.info(
+            f"Routing decision: {decision.fetcher} for {url} "
+            f"(rule: {decision.rule_name}, priority: {decision.priority})"
+        )
+
+        return decision.fetcher
+
+    except Exception as e:
+        logging.warning(f"Routing engine evaluation failed for {url}: {e}")
+        return None
+
+
+# === FAILURE LOG PERSISTENCE ===
+_FAILURE_LOG_DIR = Path.home() / '.wf'
+_FAILURE_LOG_PATH = _FAILURE_LOG_DIR / 'fetch_failures.jsonl'
+_FAILURE_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_FAILURE_LOG_BACKUP_COUNT = 3
+
+
+def _rotate_failure_log():
+    """Rotate log file when it exceeds max size. Keeps up to 3 backups."""
+    try:
+        if not _FAILURE_LOG_PATH.exists():
+            return
+        if _FAILURE_LOG_PATH.stat().st_size < _FAILURE_LOG_MAX_BYTES:
+            return
+
+        # Rotate: .3 → delete, .2 → .3, .1 → .2, current → .1
+        for i in range(_FAILURE_LOG_BACKUP_COUNT, 0, -1):
+            src = _FAILURE_LOG_PATH.with_suffix(f'.jsonl.{i}')
+            dst = _FAILURE_LOG_PATH.with_suffix(f'.jsonl.{i+1}') if i < _FAILURE_LOG_BACKUP_COUNT else None
+            if src.exists():
+                if dst:
+                    src.rename(dst)
+                else:
+                    src.unlink()
+
+        _FAILURE_LOG_PATH.rename(_FAILURE_LOG_PATH.with_suffix('.jsonl.1'))
+    except Exception as e:
+        logging.debug(f"Log rotation error (non-fatal): {e}")
+
+
+def persist_fetch_failure(
+    url: str, input_url: str, fetchers_tried: list,
+    failure_type: str, failure_reason: str,
+    last_error: str, html_size: int,
+    validation_details: list, fetch_mode: str,
+    duration_seconds: float,
+):
+    """Append a failure record to ~/.wf/fetch_failures.jsonl.
+
+    Silently degrades on any I/O error — never blocks the main pipeline.
+    """
+    try:
+        _FAILURE_LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+        _rotate_failure_log()
+
+        record = {
+            'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+            'url': url,
+            'input_url': input_url or url,
+            'fetchers_tried': fetchers_tried,
+            'failure_type': failure_type,
+            'failure_reason': failure_reason,
+            'last_error': str(last_error)[:500],
+            'html_size': html_size,
+            'validation_details': validation_details,
+            'fetch_mode': fetch_mode,
+            'duration_seconds': round(duration_seconds, 2),
+            'wf_version': __version__,
+            'hostname': _socket.gethostname(),
+        }
+
+        line = json.dumps(record, ensure_ascii=False) + '\n'
+
+        with open(_FAILURE_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+    except Exception as e:
+        logging.warning(f"Failed to persist failure log: {e}")
+
+
+# === SUCCESS LOG PERSISTENCE ===
+_HISTORY_LOG_PATH = _FAILURE_LOG_DIR / 'fetch_history.jsonl'
+_HISTORY_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_HISTORY_LOG_BACKUP_COUNT = 3
+
+
+def _rotate_history_log():
+    """Rotate history log file when it exceeds max size."""
+    try:
+        if not _HISTORY_LOG_PATH.exists():
+            return
+        if _HISTORY_LOG_PATH.stat().st_size < _HISTORY_LOG_MAX_BYTES:
+            return
+        for i in range(_HISTORY_LOG_BACKUP_COUNT, 0, -1):
+            src = _HISTORY_LOG_PATH.with_suffix(f'.jsonl.{i}')
+            dst = _HISTORY_LOG_PATH.with_suffix(f'.jsonl.{i+1}') if i < _HISTORY_LOG_BACKUP_COUNT else None
+            if src.exists():
+                if dst:
+                    src.rename(dst)
+                else:
+                    src.unlink()
+        _HISTORY_LOG_PATH.rename(_HISTORY_LOG_PATH.with_suffix('.jsonl.1'))
+    except Exception as e:
+        logging.debug(f"History log rotation error (non-fatal): {e}")
+
+
+def persist_fetch_success(
+    url: str, input_url: str, domain: str,
+    fetch_mode: str, primary_method: str,
+    fallback_method: Optional[str],
+    fetchers_tried: list, validation_failures: list,
+    duration_seconds: float, html_size: int,
+    headless_auto_launched: bool,
+    parser: str,
+):
+    """Append a success record to ~/.wf/fetch_history.jsonl.
+
+    Silently degrades on any I/O error — never blocks the main pipeline.
+    """
+    try:
+        _FAILURE_LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+        _rotate_history_log()
+
+        record = {
+            'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+            'url': url,
+            'input_url': input_url or url,
+            'domain': domain,
+            'fetch_mode': fetch_mode,
+            'primary_method': primary_method,
+            'fallback_method': fallback_method,
+            'fetchers_tried': fetchers_tried,
+            'validation_failures': validation_failures,
+            'duration_seconds': round(duration_seconds, 2),
+            'html_size': html_size,
+            'headless_auto_launched': headless_auto_launched,
+            'parser': parser,
+            'wf_version': __version__,
+            'hostname': _socket.gethostname(),
+        }
+
+        line = json.dumps(record, ensure_ascii=False) + '\n'
+
+        with open(_HISTORY_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+    except Exception as e:
+        logging.warning(f"Failed to persist history log: {e}")
+
+
+_FETCH_TOTAL_DEADLINE = 120  # seconds — hard cap on total fetch time including all fallbacks
+
+
+def _try_fallback_for_invalid_content(
+    url: str, html: str, validation_reason: str,
+    ua: Optional[str], timeout: int,
+    metrics: FetchMetrics, start_time: float,
+    input_url: str = None, force_chrome: bool = False,
+    tried_fetchers: set = None,
+) -> tuple[str, FetchMetrics, dict]:
+    """Try higher-capability fetchers when content validation fails.
+
+    Unlike _try_cdp_fallback_after_urllib_failure (which handles fetch *exceptions*),
+    this handles fetch *success with invalid content*.
+
+    Cascade: CDP → Selenium → Manual Chrome, validating each result.
+    If all fail validation, returns the longest HTML as degraded output.
+    """
+    if tried_fetchers is None:
+        tried_fetchers = set()
+
+    best_html = html
+    best_html_len = len(html) if html else 0
+    best_metrics = metrics
+    best_url_metadata = create_url_metadata(input_url=input_url or url, final_url=url, fetch_mode='urllib')
+
+    # Simplified fallback chain: CDP → manual_chrome
+    # Selenium removed from auto fallback — CDP covers the same capability
+    # (both use Chrome for JS rendering, but CDP reuses sessions/headless).
+    # Selenium is still available via explicit --fetch-mode selenium.
+    fallback_chain = [
+        ('cdp', _try_cdp_fetch, CDP_INTEGRATION_AVAILABLE),
+        ('manual_chrome', lambda u, ua, t, m, st, iu: _try_manual_chrome_fallback(
+            u, m, st, f"Content invalid: {validation_reason}", iu),
+         MANUAL_CHROME_AVAILABLE and manual_chrome_helper is not None),
+    ]
+
+    for fetcher_name, fetch_fn, available in fallback_chain:
+        if fetcher_name in tried_fetchers:
+            continue
+
+        elapsed = time.time() - start_time
+        if elapsed >= _FETCH_TOTAL_DEADLINE:
+            logging.warning(f"Content validation fallback: deadline exceeded ({elapsed:.0f}s >= {_FETCH_TOTAL_DEADLINE}s)")
+            break
+
+        if not available:
+            logging.info(f"Content validation fallback: {fetcher_name} not available, skipping")
+            continue
+
+        tried_fetchers.add(fetcher_name)
+        logging.info(f"Content validation fallback: trying {fetcher_name} (reason: {validation_reason})")
+
+        try:
+            fb_metrics = FetchMetrics(primary_method=fetcher_name)
+            fb_start = time.time()
+            fb_html, fb_metrics, fb_url_metadata = fetch_fn(url, ua, timeout, fb_metrics, fb_start, input_url)
+
+            if not fb_html:
+                logging.warning(f"Content validation fallback: {fetcher_name} returned empty HTML")
+                metrics.validation_failures.append((fetcher_name, 'fetch_empty'))
+                continue
+
+            is_valid, reason = validate_fetched_html(fb_html, url)
+
+            if is_valid:
+                logging.info(f"Content validation fallback: {fetcher_name} returned valid content ({len(fb_html)} chars)")
+                fb_metrics.fallback_method = fetcher_name
+                fb_metrics.validation_failures = metrics.validation_failures
+                return fb_html, fb_metrics, fb_url_metadata
+
+            logging.warning(f"Content validation fallback: {fetcher_name} also invalid ({reason})")
+            metrics.validation_failures.append((fetcher_name, reason))
+
+            if len(fb_html) > best_html_len:
+                best_html = fb_html
+                best_html_len = len(fb_html)
+                best_metrics = fb_metrics
+                best_url_metadata = fb_url_metadata
+
+        except Exception as e:
+            logging.warning(f"Content validation fallback: {fetcher_name} failed: {e}")
+            metrics.validation_failures.append((fetcher_name, f'error:{type(e).__name__}'))
+
+    # All fallbacks failed or exhausted — return best HTML as degraded output
+    logging.warning(
+        f"All fetchers failed content validation for {url}. "
+        f"Returning best result ({best_html_len} chars). "
+        f"Failures: {metrics.validation_failures}"
+    )
+    # Persist failure log
+    persist_fetch_failure(
+        url=url,
+        input_url=input_url or url,
+        fetchers_tried=list(tried_fetchers),
+        failure_type='content_invalid',
+        failure_reason=validation_reason,
+        last_error='',
+        html_size=best_html_len,
+        validation_details=[f"{f}:{r}" for f, r in metrics.validation_failures],
+        fetch_mode='auto',
+        duration_seconds=time.time() - start_time,
+    )
+    best_metrics.validation_failures = metrics.validation_failures
+    best_metrics.final_status = "degraded"
+    return best_html, best_metrics, best_url_metadata
+
+
+def fetch_html_with_retry(url: str, ua: Optional[str] = None, timeout: int = 30,
+                         fetch_mode: str = 'auto', force_chrome: bool = False,
+                         input_url: str = None) -> tuple[str, FetchMetrics, dict]:
+    """
+    Fetch HTML with exponential backoff retry logic and multi-layer fallback strategy.
+
+    Implements intelligent fallback chain:
+    1. Try urllib first (existing retry logic)
+    2. If urllib fails AND fetch_mode='auto', try CDP (Chrome DevTools Protocol)
+    3. If CDP fails or unavailable, try Selenium fallback (preserves login state)
+    4. If Selenium fails, try manual Chrome as last resort
+
+    Args:
+        url: Target URL to fetch
+        ua: User agent string (optional)
+        timeout: Network timeout in seconds
+        fetch_mode: 'auto' (urllib->cdp->selenium), 'urllib' (urllib only),
+                   'cdp' (cdp only), 'selenium' (selenium only)
+        force_chrome: Skip Chrome health check (for faster fallback)
+        input_url: Original URL as provided by user 
+
+    Returns:
+        tuple[str, FetchMetrics, dict]: (html_content, fetch_metrics, url_metadata)
+                                        url_metadata contains input_url, final_url, fetch_date, fetch_mode
+    """
+    metrics = FetchMetrics(primary_method="urllib")
+    start_time = time.time()
+    last_exception = None
+    deadline = start_time + _FETCH_TOTAL_DEADLINE
+
+    # === CONFIG-DRIVEN ROUTING: Intelligent fetcher selection ===
+    # === 配置驱动路由：智能获取器选择 ===
+    if fetch_mode == 'auto':
+        # Try config-driven routing first (Task-1)
+        fetcher_choice = _determine_fetcher_via_routing(url)
+
+        if fetcher_choice == 'selenium':
+            print(f"🚀 Config-driven routing: Using Selenium for {url}", file=sys.stderr)
+            logging.info(f"🚀 Config-driven routing to Selenium: {url}")
+            metrics.primary_method = "selenium_direct"
+
+            try:
+                html, metrics, url_metadata = _try_selenium_fetch(url, ua, timeout, metrics, start_time, force_chrome, input_url)
+                is_valid, reason = validate_fetched_html(html, url)
+                if not is_valid:
+                    logging.warning(f"Config-driven Selenium content validation failed: {reason}")
+                    metrics.validation_failures.append(('selenium', reason))
+                    # Try fallback chain (skip selenium, CDP may still help)
+                    logging.info(f"Config-driven Selenium fallback: trying CDP/manual_chrome for {url}")
+                    return _try_fallback_for_invalid_content(
+                        url, html, reason, ua, timeout, metrics, start_time,
+                        input_url=input_url, force_chrome=force_chrome,
+                        tried_fetchers={'selenium'},
+                    )
+                return html, metrics, url_metadata
+            except Exception as e:
+                logging.warning(f"Selenium fetch failed for {url}, falling back to urllib: {e}")
+                metrics.primary_method = "urllib"
+                # Continue to urllib logic below
+
+        elif fetcher_choice == 'cdp':
+            # CDP requested by routing config (e.g., for Google Search)
+            print(f"🚀 Config-driven routing: Using CDP for {url}", file=sys.stderr)
+            logging.info(f"🚀 Config-driven routing to CDP: {url}")
+            metrics.primary_method = "cdp_direct"
+
+            try:
+                html, metrics, url_metadata = _try_cdp_fetch(url, ua, timeout, metrics, start_time, input_url)
+                is_valid, reason = validate_fetched_html(html, url)
+                if not is_valid:
+                    logging.warning(f"Config-driven CDP content validation failed: {reason}")
+                    metrics.validation_failures.append(('cdp', reason))
+                    # Try fallback chain (skip CDP since we already tried it)
+                    logging.info(f"Config-driven CDP fallback: trying manual_chrome for {url}")
+                    return _try_fallback_for_invalid_content(
+                        url, html, reason, ua, timeout, metrics, start_time,
+                        input_url=input_url, force_chrome=force_chrome,
+                        tried_fetchers={'cdp'},
+                    )
+                return html, metrics, url_metadata
+            except Exception as e:
+                logging.warning(f"CDP fetch failed for {url}, falling back to urllib: {e}")
+                metrics.primary_method = "urllib"
+                # Continue to urllib logic below
+
+        elif fetcher_choice == 'manual_chrome':
+            # Manual Chrome requested by routing config
+            # This should rarely happen as manual_chrome is typically a fallback
+            # But configuration allows it for specific problematic sites
+            logging.info(f"Config-driven routing requested manual_chrome for {url}")
+            # Let manual Chrome be triggered via normal fallback chain
+            # Don't force it here to allow other methods to try first
+            pass
+
+        # If fetcher_choice is 'urllib' or None, continue with normal urllib flow
+
+    # Phase 2: Handle explicit fetch mode requests
+    if fetch_mode == 'selenium':
+        metrics.primary_method = "selenium"
+        return _try_selenium_fetch(url, ua, timeout, metrics, start_time, force_chrome, input_url)
+
+    if fetch_mode == 'cdp':
+        metrics.primary_method = "cdp"
+        return _try_cdp_fetch(url, ua, timeout, metrics, start_time, input_url)
+
+    # Try urllib first (fetch_mode: 'auto' or 'urllib')
+    for attempt in range(MAX_RETRIES + 1):  # 0, 1, 2, 3 (4 total attempts)
+        metrics.total_attempts = attempt + 1
+        
+        try:
+            if attempt > 0:
+                # Check deadline before retrying
+                if time.time() >= deadline:
+                    logging.warning(f"Deadline exceeded ({_FETCH_TOTAL_DEADLINE}s), stopping retries for {url}")
+                    break
+                delay = calculate_backoff_delay(attempt - 1)
+                logging.info(f"Retry attempt {attempt}/{MAX_RETRIES} for {url} after {delay:.1f}s delay")
+                time.sleep(delay)
+            
+            # Call the original fetch_html function and track metrics
+            html, fetch_metrics, final_url = fetch_html_original(url, ua, timeout)
+            
+
+            # Merge metrics from original fetch
+            metrics.fetch_duration = time.time() - start_time
+            metrics.ssl_fallback_used = fetch_metrics.ssl_fallback_used
+            if fetch_metrics.fallback_method:
+                metrics.fallback_method = fetch_metrics.fallback_method
+            metrics.final_status = "success"
+
+          
+            url_metadata = create_url_metadata(
+                input_url=input_url or url,  # Use preserved input_url if provided
+                final_url=final_url,
+                fetch_mode='urllib'
+            )
+
+            # Content validation — check before returning
+            if fetch_mode == 'auto':
+                is_valid, reason = validate_fetched_html(html, url)
+                if not is_valid:
+                    logging.warning(f"urllib content validation failed for {url}: {reason}")
+                    metrics.validation_failures.append(('urllib', reason))
+                    return _try_fallback_for_invalid_content(
+                        url, html, reason, ua, timeout, metrics, start_time,
+                        input_url, force_chrome, tried_fetchers={'urllib'},
+                    )
+
+            return html, metrics, url_metadata
+            
+        except Exception as e:
+            last_exception = e
+
+            # Log the error with context
+            if attempt == 0:
+                logging.warning(f"Initial fetch failed for {url}: {type(e).__name__}: {e}")
+            else:
+                logging.warning(f"Retry {attempt}/{MAX_RETRIES} failed for {url}: {type(e).__name__}: {e}")
+
+            # Phase 1: Classify error using unified classifier
+            should_retry = True
+            wait_time = calculate_backoff_delay(attempt) if attempt < MAX_RETRIES else 0
+
+            if ERROR_CLASSIFIER_AVAILABLE and error_classifier:
+                classification = error_classifier.classify_error(e, url)
+                # B3: 分类为 unknown 时改人类可读，避免开发内部术语吓到用户
+                if classification.error_type == ErrorType.UNKNOWN:
+                    logging.info(
+                        f"未知错误（重试策略分类器未识别），原始: {type(e).__name__}: {e}; "
+                        f"将按保守策略重试")
+                else:
+                    logging.info(
+                        f"Error classified as {classification.error_type.value}: "
+                        f"{classification.reason}")
+
+                # Handle permanent errors
+                if classification.error_type == ErrorType.PERMANENT:
+                    logging.error(f"Permanent error: {classification.reason}")
+                    if classification.fallback_method == "selenium" and fetch_mode == 'auto':
+                        return _try_cdp_fallback_after_urllib_failure(url, ua, timeout, metrics, start_time, str(e), input_url, force_chrome)
+
+                    # Store the exception for error reporting
+                    metrics.fetch_duration = time.time() - start_time
+                    metrics.final_status = "failed"
+                    metrics.error_message = str(e)
+                    raise e
+
+                # Handle SSL configuration errors - immediate CDP/Selenium fallback
+                elif classification.error_type == ErrorType.SSL_CONFIG:
+                    logging.warning(f"SSL configuration error: {classification.reason}")
+                    if fetch_mode == 'auto':
+                        return _try_cdp_fallback_after_urllib_failure(url, ua, timeout, metrics, start_time, str(e), input_url, force_chrome)
+
+                    metrics.fetch_duration = time.time() - start_time
+                    metrics.final_status = "failed"
+                    metrics.error_message = str(e)
+                    raise e
+
+                # Use classifier's retry recommendation
+                should_retry = classification.should_retry
+                wait_time = classification.recommended_wait if classification.should_retry else 0
+            else:
+                # Fallback to legacy should_retry_exception logic
+                should_retry = should_retry_exception(e)
+
+            # Check if we should retry this exception
+            if not should_retry:
+                # Special handling for HTTP 307 redirect loops
+                if isinstance(e, urllib.error.HTTPError) and e.status == 307:
+                    logging.error(f"HTTP 307 redirect loop detected for {url}. "
+                                 f"This may indicate a redirect loop. "
+                                 f"Try using a specific page URL instead of the root domain.")
+                else:
+                    logging.info(f"Non-retryable error for {url}, failing immediately: {type(e).__name__}")
+
+                # Phase 2: Immediate CDP/Selenium fallback for non-retryable errors (if enabled)
+                if fetch_mode == 'auto':
+                    return _try_cdp_fallback_after_urllib_failure(url, ua, timeout, metrics, start_time, str(e), input_url, force_chrome)
+
+                # Store the exception for error reporting
+                metrics.fetch_duration = time.time() - start_time
+                metrics.final_status = "failed"
+                metrics.error_message = str(e)
+                raise e
+
+            # If this was the last attempt, don't sleep
+            if attempt == MAX_RETRIES:
+                break
+
+            # Use classifier's recommended wait time if available
+            if wait_time > 0 and attempt < MAX_RETRIES:
+                logging.info(f"Waiting {wait_time:.1f}s before retry {attempt + 1}/{MAX_RETRIES}")
+                time.sleep(wait_time)
+    
+    # Phase 2: All urllib retry attempts exhausted - try CDP then Selenium fallback if enabled
+    if fetch_mode == 'auto':
+        return _try_cdp_fallback_after_urllib_failure(url, ua, timeout, metrics, start_time, str(last_exception), input_url, force_chrome)
+
+    # urllib-only mode or fallbacks not enabled - fail normally
+    metrics.fetch_duration = time.time() - start_time
+    metrics.final_status = "failed"
+    metrics.error_message = str(last_exception)
+    # B4: 重试终结时打一行结构化总结（AI 在长日志里能 grep 抓结论）
+    try:
+        from webfetcher.errors.user_facing import classify_user_error, format_retry_summary
+        _err = classify_user_error(last_exception)
+        logging.error(format_retry_summary(MAX_RETRIES + 1, _err.category, _err.explanation))
+    except Exception:
+        # 兜底：分类失败也不阻塞，保留原有日志
+        pass
+    logging.error(f"All {MAX_RETRIES + 1} attempts failed for {url}, giving up")
+    raise last_exception
+
+
+
+def _create_empty_metrics_with_guidance() -> FetchMetrics:
+    """
+    Create empty metrics with helpful guidance message.
+    Used when both urllib and Selenium fail or Selenium is unavailable.
+    """
+    metrics = FetchMetrics(
+        primary_method="failed",
+        final_status="failed",
+        error_message="Both urllib and Selenium failed. To enable Selenium fallback, start Chrome debug session with: ./config/chrome-debug.sh"
+    )
+    return metrics
+
+
+def _try_cdp_fallback_after_urllib_failure(url: str, ua: Optional[str], timeout: int,
+                                           metrics: FetchMetrics, start_time: float,
+                                           urllib_error: str, input_url: str = None,
+                                           force_chrome: bool = False) -> tuple[str, FetchMetrics, dict]:
+    """
+    Try CDP fallback after urllib failure, with manual Chrome as last resort.
+
+    Simplified fallback chain (v1.3+):
+    1. Try CDP (lightweight, session-preserving, auto-headless)
+    2. If CDP fails, try manual Chrome (human-assisted)
+
+    Selenium removed from auto fallback — CDP covers the same capability.
+    Selenium still available via explicit --fetch-mode selenium.
+
+    Args:
+        url: Target URL
+        ua: User agent (may be ignored by CDP/Chrome)
+        timeout: Timeout in seconds
+        metrics: FetchMetrics object to update
+        start_time: Start time for duration calculation
+        urllib_error: Error message from urllib failure
+        input_url: Original URL as provided by user
+        force_chrome: Skip health check and use Chrome immediately
+
+    Returns:
+        tuple[str, FetchMetrics, dict]: (html_content, updated_metrics, url_metadata)
+    """
+    logging.info(f"urllib failed for {url}, attempting CDP fallback...")
+
+    if not CDP_INTEGRATION_AVAILABLE:
+        logging.info("CDP not available, falling back to manual Chrome")
+        return _try_manual_chrome_or_fail(
+            url, ua, timeout, metrics, start_time, urllib_error, input_url, force_chrome
+        )
+
+    try:
+        # Try CDP fetch
+        logging.info(f"🔌 Attempting CDP fallback for {url}")
+        html, metrics, url_metadata = _try_cdp_fetch(url, ua, timeout, metrics, start_time, input_url)
+
+        # CDP succeeded - validate content before accepting
+        is_valid, reason = validate_fetched_html(html, url)
+        if not is_valid:
+            logging.warning(f"CDP fallback content validation failed for {url}: {reason}")
+            metrics.validation_failures.append(('cdp', reason))
+            # Skip Selenium, go directly to manual Chrome
+            return _try_manual_chrome_or_fail(
+                url, ua, timeout, metrics, start_time,
+                f"urllib failed: {urllib_error}. CDP content invalid: {reason}",
+                input_url, force_chrome
+            )
+
+        metrics.fallback_method = "cdp"
+        logging.info(f"✓ CDP fallback successful for {url}")
+
+        return html, metrics, url_metadata
+
+    except Exception as cdp_error:
+        logging.warning(f"CDP fallback failed: {cdp_error}")
+        logging.info("Falling back to manual Chrome after CDP failure")
+
+        # CDP failed - skip Selenium, go to manual Chrome
+        return _try_manual_chrome_or_fail(
+            url, ua, timeout, metrics, start_time,
+            f"urllib failed: {urllib_error}. CDP failed: {cdp_error}",
+            input_url, force_chrome
+        )
+
+
+def _try_manual_chrome_or_fail(url: str, ua: Optional[str], timeout: int,
+                               metrics: FetchMetrics, start_time: float,
+                               error_context: str, input_url: str = None,
+                               force_chrome: bool = False) -> tuple[str, FetchMetrics, dict]:
+    """Try manual Chrome as last resort, or fail with a clear error.
+
+    This replaces the old Selenium fallback path — CDP now covers JS rendering,
+    so we skip Selenium and go directly to manual Chrome (human-assisted).
+    """
+    if MANUAL_CHROME_AVAILABLE and manual_chrome_helper is not None:
+        try:
+            return _try_manual_chrome_fallback(
+                url, metrics, start_time, error_context, input_url
+            )
+        except Exception as e:
+            logging.error(f"Manual Chrome also failed: {e}")
+
+    # Everything failed
+    metrics.fetch_duration = time.time() - start_time
+    metrics.final_status = "failed"
+    metrics.error_message = error_context
+    raise Exception(error_context)
+
+
+def _try_cdp_fetch(url: str, ua: Optional[str], timeout: int, metrics: FetchMetrics, start_time: float, input_url: str = None, wait_time: float = 3.0) -> tuple[str, FetchMetrics, dict]:
+    """
+    Try CDP (Chrome DevTools Protocol) fetch.
+
+    Requires Chrome to be running in debug mode (port 9222).
+    Advantages over Selenium:
+    - Lighter weight
+    - Reuses real browser session (keeps login state)
+    - Faster connection
+
+    Args:
+        url: Target URL
+        ua: User agent (ignored - uses Chrome's real UA)
+        timeout: Timeout in seconds (not strictly enforced in CDP)
+        metrics: FetchMetrics object to update
+        start_time: Start time for duration calculation
+        input_url: Original URL as provided by user (for metadata tracking)
+        wait_time: Time to wait for page rendering (default 3s)
+
+    Returns:
+        tuple[str, FetchMetrics, dict]: (html_content, updated_metrics, url_metadata)
+
+    Raises:
+        Exception: When CDP is not available or fetch fails
+    """
+    if not CDP_INTEGRATION_AVAILABLE:
+        error_msg = "CDP integration not available - install with: pip install pychrome"
+        logging.error(f"CDP mode requested but CDP integration not available")
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = error_msg
+        raise Exception(error_msg)
+
+    try:
+        # Ensure Chrome is available (headless auto-launch or existing session)
+        cdp_port = None
+        headless_mode = getattr(_try_cdp_fetch, '_headless_mode', 'auto')
+        if HEADLESS_MANAGER_AVAILABLE:
+            try:
+                cdp_port = ensure_headless_chrome(mode=headless_mode)
+            except Exception as e:
+                logging.warning(f"Headless Chrome manager failed: {e}")
+                # Fall back to legacy ensure_chrome_debug
+                try:
+                    ensure_chrome_debug(None)
+                except Exception as e2:
+                    logging.warning(f"Legacy Chrome check also failed: {e2}")
+        else:
+            try:
+                ensure_chrome_debug(None)
+            except Exception as e:
+                logging.warning(f"Failed to auto-start Chrome for CDP: {e}")
+
+        logging.info(f"🔌 Attempting CDP fetch for {url}")
+
+        # Use the simplified fetch_with_cdp interface
+        lite_mode = getattr(_try_cdp_fetch, '_lite_mode', False)
+        html, final_url, cdp_metadata = fetch_with_cdp(url, wait_time=wait_time, port=cdp_port, lite_mode=lite_mode)
+
+        # Update metrics
+        metrics.fetch_duration = time.time() - start_time
+        metrics.primary_method = "cdp"
+        metrics.final_status = "success"
+        metrics._lite_mode = lite_mode
+
+        # Create URL metadata
+        url_metadata = create_url_metadata(
+            input_url=input_url or url,
+            final_url=final_url,
+            fetch_mode='cdp'
+        )
+
+        logging.info(f"✓ CDP fetch successful for {url}" + (" [lite]" if lite_mode else ""))
+        logging.info(f"  HTML length: {len(html)} chars")
+        logging.info(f"  Duration: {metrics.fetch_duration:.2f}s")
+
+        return html, metrics, url_metadata
+
+    except Exception as e:
+        error_msg = f"CDP fetch failed: {str(e)}"
+        logging.error(error_msg)
+
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = error_msg
+
+        raise Exception(error_msg)
+
+
+def _try_selenium_fetch(url: str, ua: Optional[str], timeout: int, metrics: FetchMetrics, start_time: float, force_chrome: bool = False, input_url: str = None) -> tuple[str, FetchMetrics, dict]:
+    """
+    Try Selenium fetch as primary method (selenium-only mode).
+
+    Phase 2 Enhancement: Raises exceptions on failure instead of returning empty string.
+    This ensures proper error propagation and non-zero exit codes.
+
+    Args:
+        url: Target URL
+        ua: User agent (ignored - Chrome uses its own)
+        timeout: Timeout in seconds
+        metrics: FetchMetrics object to update
+        start_time: Start time for duration calculation
+        input_url: Original URL as provided by user 
+
+    Returns:
+        tuple[str, FetchMetrics, dict]: (html_content, updated_metrics, url_metadata)
+
+    Raises:
+        SeleniumNotAvailableError: When Selenium integration is not available
+        ChromeConnectionError: When Chrome connection fails
+        SeleniumFetchError: When Selenium fetch fails
+        SeleniumTimeoutError: When fetch times out
+    """
+    if not SELENIUM_INTEGRATION_AVAILABLE:
+        error_msg = "Selenium integration not available - install requirements-selenium.txt"
+        logging.error(f"Selenium mode requested but Selenium integration not available")
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = error_msg
+        raise SeleniumNotAvailableError(error_msg)
+
+    try:
+        # Load Selenium configuration
+        config = SeleniumConfig()
+
+        # Check if actual Selenium package is available before creating fetcher
+        from webfetcher.fetchers.selenium import SELENIUM_AVAILABLE
+        if not SELENIUM_AVAILABLE:
+            error_msg = "Selenium package not installed. Run: pip install selenium PyYAML lxml"
+            logging.error(f"Selenium package not installed (selenium library missing)")
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = error_msg
+            raise SeleniumNotAvailableError(error_msg)
+
+        # Phase 1 & 2: Ensure Chrome debug session is running with enhanced error handling
+      
+        logging.info("Checking Chrome debug session health...")
+        try:
+            chrome_ok, chrome_message = ensure_chrome_debug(config._config, force_mode=force_chrome)
+            metrics.chrome_auto_launched = chrome_ok
+            metrics.chrome_launch_message = chrome_message
+        except ChromePortConflictError as e:
+            # Port conflict - display user-friendly guidance
+            logging.error(f"Chrome port conflict: {e.message}")
+            if e.guidance:
+                print(f"\n{e.guidance}\n", file=sys.stderr)
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = e.message
+            raise
+        except ChromePermissionError as e:
+            # Permission denied - display macOS-specific guidance
+            logging.error(f"Chrome permission error: {e.message}")
+            if e.guidance:
+                print(f"\n{e.guidance}\n", file=sys.stderr)
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = e.message
+            raise
+        except ChromeTimeoutError as e:
+            # Chrome timeout - display troubleshooting steps
+            logging.error(f"Chrome timeout: {e.message}")
+            if e.guidance:
+                print(f"\n{e.guidance}\n", file=sys.stderr)
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = e.message
+            raise
+        except ChromeLaunchError as e:
+            # General launch failure - display diagnostic guidance
+            logging.error(f"Chrome launch failed: {e.message}")
+            if e.guidance:
+                print(f"\n{e.guidance}\n", file=sys.stderr)
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = e.message
+            raise ChromeConnectionError(e.message)
+
+        # Create and use Selenium fetcher
+        with SeleniumFetcher(config._config) as fetcher:
+            # Connect to Chrome - enhanced with version mismatch detection and better error messages
+            success, message = fetcher.connect_to_chrome()
+            if not success:
+                metrics.fetch_duration = time.time() - start_time
+                metrics.final_status = "failed"
+                metrics.error_message = message
+
+                # Log specific error types for better debugging
+                if "version mismatch" in message.lower():
+                    logging.error(f"Chrome/ChromeDriver version mismatch detected: {message}")
+                elif "debug session not available" in message.lower():
+                    logging.error(f"Chrome debug session unavailable: {message}")
+                else:
+                    logging.error(f"Chrome connection failed: {message}")
+
+                # Phase 2: Raise exception instead of returning empty string
+                raise ChromeConnectionError(message)
+
+            # Fetch HTML using Selenium
+            html_content, selenium_metrics = fetcher.fetch_html_selenium(url, ua, timeout)
+
+            # Update main metrics with Selenium data
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "success"
+            metrics.selenium_wait_time = selenium_metrics.selenium_wait_time
+            metrics.chrome_connected = selenium_metrics.chrome_connected
+            metrics.js_detection_used = selenium_metrics.js_detection_used
+
+          
+            selenium_final_url = selenium_metrics.final_url if hasattr(selenium_metrics, 'final_url') and selenium_metrics.final_url else url
+            url_metadata = create_url_metadata(
+                input_url=input_url or url,
+                final_url=selenium_final_url,
+                fetch_mode='selenium'
+            )
+
+            logging.info(f"✓ Selenium fetch successful for {url}")
+            return html_content, metrics, url_metadata
+
+    except (ChromeConnectionError, SeleniumFetchError, SeleniumTimeoutError, SeleniumNotAvailableError):
+        # Re-raise Selenium-specific exceptions to propagate them up
+        raise
+
+    except Exception as e:
+        logging.error(f"Unexpected error in Selenium fetch for {url}: {e}")
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        error_msg = f"Unexpected Selenium error: {e}"
+        metrics.error_message = error_msg
+        raise SeleniumFetchError(error_msg) from e
+
+
+def _try_manual_chrome_fallback(url: str, metrics: FetchMetrics, start_time: float,
+                                previous_errors: str, input_url: str = None) -> tuple[str, FetchMetrics, dict]:
+    """
+    Try manual Chrome hybrid fallback as last resort after all automated methods fail.
+
+    Manual Chrome Hybrid Integration.
+    It should only be called after BOTH urllib and Selenium have failed.
+
+    The manual Chrome approach works by:
+    1. Starting Chrome with remote debugging enabled
+    2. Asking the user to manually navigate to the URL
+    3. Attaching via Selenium CDP to extract the content
+    4. Cleaning up resources
+
+    This bypasses anti-bot detection because the human navigation is legitimate.
+
+    Args:
+        url: Target URL to fetch
+        metrics: FetchMetrics object to update
+        start_time: Start time for duration calculation
+        previous_errors: Combined error messages from urllib and Selenium failures
+
+    Returns:
+        tuple[str, FetchMetrics]: (html_content, updated_metrics)
+                                  Returns empty string if manual Chrome fails or is disabled
+    """
+  
+    url_metadata = create_url_metadata(
+        input_url=input_url or url,
+        final_url=url,
+        fetch_mode='manual_chrome'
+    )
+
+    # Check if manual Chrome is available and enabled
+    if not MANUAL_CHROME_AVAILABLE or manual_chrome_helper is None:
+        logging.debug("Manual Chrome fallback not available or disabled")
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = (
+            f"All automated methods failed: {previous_errors}\n"
+            f"Manual Chrome fallback is not enabled. "
+            f"To enable, set enabled: true in config/manual_chrome_config.yaml"
+        )
+        return "", metrics, url_metadata
+
+    logging.info(f"All automated methods failed for {url}, attempting manual Chrome fallback...")
+    print("\n" + "="*70, file=sys.stderr)
+    print("  AUTOMATED METHODS FAILED - MANUAL CHROME FALLBACK TRIGGERED", file=sys.stderr)
+    print("="*70, file=sys.stderr)
+    print(f"\nURL: {url}", file=sys.stderr)
+    print(f"\nAutomated methods failed with: {previous_errors[:200]}...", file=sys.stderr)
+    print("\nAttempting manual Chrome fallback (human-assisted fetch)...\n", file=sys.stderr)
+
+    try:
+        # Call manual Chrome helper
+        success, html, error = manual_chrome_helper.start_session(url)
+
+        if success and html:
+            # Manual Chrome succeeded!
+            metrics.fallback_method = "manual_chrome"
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "success"
+
+            logging.info(f"✓ Manual Chrome fallback successful for {url}! Extracted {len(html)} bytes")
+            print("\n" + "="*70, file=sys.stderr)
+            print(f"  SUCCESS! Extracted {len(html):,} bytes via manual Chrome", file=sys.stderr)
+            print("="*70 + "\n", file=sys.stderr)
+
+            return html, metrics, url_metadata
+        else:
+            # Manual Chrome failed
+            logging.warning(f"Manual Chrome fallback failed for {url}: {error}")
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "failed"
+            metrics.error_message = (
+                f"All methods failed: {previous_errors}\n"
+                f"Manual Chrome fallback also failed: {error}"
+            )
+            return "", metrics, url_metadata
+
+    except KeyboardInterrupt:
+        # User cancelled (Ctrl+C)
+        logging.info("Manual Chrome fallback cancelled by user")
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "cancelled"
+        metrics.error_message = "User cancelled manual Chrome fallback"
+        print("\n\nManual Chrome fallback cancelled by user (Ctrl+C)\n", file=sys.stderr)
+        return "", metrics, url_metadata
+
+    except Exception as e:
+        # Unexpected error in manual Chrome
+        logging.error(f"Unexpected error in manual Chrome fallback: {e}", exc_info=True)
+        metrics.fetch_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = (
+            f"All methods failed: {previous_errors}\n"
+            f"Manual Chrome fallback error: {str(e)}"
+        )
+        return "", metrics, url_metadata
+
+
+def _try_selenium_fallback_after_urllib_failure(url: str, ua: Optional[str], timeout: int,
+                                               metrics: FetchMetrics, start_time: float,
+                                               urllib_error: str, input_url: str = None,
+                                               force_chrome: bool = False) -> tuple[str, FetchMetrics, dict]:
+    """
+    Try Selenium fallback after urllib failure. Implements loop-free session-first strategy.
+    
+    CRITICAL: This function implements the core Phase 2 fallback logic:
+    1. Check if Chrome debug session is available (NO new instance creation)
+    2. If available, connect and fetch
+    3. If not available, accept empty result with guidance (NO retry loops)
+    
+    Args:
+        url: Target URL
+        ua: User agent (ignored - Chrome uses its own)
+        timeout: Timeout in seconds
+        metrics: FetchMetrics object to update
+        start_time: Start time for duration calculation
+        urllib_error: Error message from urllib failure
+        input_url: Original URL as provided by user (for metadata tracking)
+        force_chrome: Skip health check and use Chrome immediately
+
+    Returns:
+        tuple[str, FetchMetrics, dict]: (html_content, updated_metrics, url_metadata)
+    """
+    logging.info(f"urllib failed for {url}, attempting Selenium fallback...")
+    
+    if not SELENIUM_INTEGRATION_AVAILABLE:
+        logging.warning("Selenium fallback requested but integration not available")
+        # Try manual Chrome as last resort
+        error_msg = f"urllib failed: {urllib_error}. Selenium fallback not available - install requirements-selenium.txt"
+        return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+    
+    try:
+        # Load Selenium configuration
+        config = SeleniumConfig()
+
+        # Check if actual Selenium package is available
+        from webfetcher.fetchers.selenium import SELENIUM_AVAILABLE
+        if not SELENIUM_AVAILABLE:
+            logging.warning("Selenium package not installed, cannot use as fallback")
+            # Try manual Chrome as last resort
+            error_msg = f"urllib failed: {urllib_error}. Selenium package not installed. Run: pip install selenium PyYAML lxml"
+            return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+
+        # Phase 1 & 2: Ensure Chrome debug session is running with enhanced error handling
+      
+        logging.info("Checking Chrome debug session health for fallback...")
+        try:
+            chrome_ok, chrome_message = ensure_chrome_debug(config._config, force_mode=force_chrome)
+            metrics.chrome_auto_launched = chrome_ok
+            metrics.chrome_launch_message = chrome_message
+        except (ChromePortConflictError, ChromePermissionError, ChromeTimeoutError, ChromeLaunchError) as e:
+            # Chrome error during fallback - log but don't display full guidance (fallback context)
+            # User gets basic error message since this is a fallback scenario
+            logging.warning(f"Chrome unavailable for fallback: {e.message}")
+            print(f"\nChrome debug session unavailable for fallback: {e.message}", file=sys.stderr)
+            print("Suggestion: Try running './config/ensure-chrome-debug.sh' manually to diagnose.", file=sys.stderr)
+            # Try manual Chrome as last resort
+            error_msg = f"urllib failed: {urllib_error}. Chrome unavailable: {e.message}"
+            return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+
+        # Create Selenium fetcher after Chrome health check passed
+        fetcher = SeleniumFetcher(config._config)
+
+        # Chrome debug session available - attempt connection and fetch
+        with fetcher:
+            success, message = fetcher.connect_to_chrome()
+            if not success:
+                logging.warning(f"Failed to connect to Chrome debug session: {message}")
+                # Try manual Chrome as last resort
+                error_msg = f"urllib failed: {urllib_error}. Chrome connection failed: {message}"
+                return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+            
+            # Attempt Selenium fetch
+            html_content, selenium_metrics = fetcher.fetch_html_selenium(url, ua, timeout)
+            
+            # Update metrics - urllib failed, Selenium succeeded
+            metrics.fallback_method = "selenium"
+            metrics.fetch_duration = time.time() - start_time
+            metrics.final_status = "success"
+            metrics.selenium_wait_time = selenium_metrics.selenium_wait_time
+            metrics.chrome_connected = selenium_metrics.chrome_connected
+            metrics.js_detection_used = selenium_metrics.js_detection_used
+
+          
+            selenium_final_url = selenium_metrics.final_url if hasattr(selenium_metrics, 'final_url') and selenium_metrics.final_url else url
+            url_metadata = create_url_metadata(
+                input_url=input_url or url,
+                final_url=selenium_final_url,
+                fetch_mode='selenium'
+            )
+
+            logging.info(f"✓ Selenium fallback successful for {url} after urllib failure")
+            return html_content, metrics, url_metadata
+            
+    except (ChromeConnectionError, SeleniumFetchError, SeleniumTimeoutError) as e:
+        logging.error(f"Selenium fallback failed for {url}: {e}")
+        # Try manual Chrome as last resort
+        error_msg = f"urllib failed: {urllib_error}. Selenium fallback failed: {e}"
+        return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+
+    except Exception as e:
+        logging.error(f"Unexpected error in Selenium fallback for {url}: {e}")
+        # Try manual Chrome as last resort
+        error_msg = f"urllib failed: {urllib_error}. Unexpected Selenium error: {e}"
+        return _try_manual_chrome_fallback(url, metrics, start_time, error_msg, input_url)
+
+
+def extract_charset_from_headers(response) -> Optional[str]:
+    """
+    从HTTP响应头提取charset编码信息
+    
+    Args:
+        response: HTTP响应对象
+        
+    Returns:
+        Optional[str]: 提取到的编码名称，如果未找到则返回None
+    """
+    content_type = response.headers.get('Content-Type', '')
+    if not content_type:
+        return None
+    
+    # 查找charset参数
+    charset_match = re.search(r'charset=([^;\s]+)', content_type, re.IGNORECASE)
+    if charset_match:
+        charset = charset_match.group(1).strip('"\'').lower()
+        # 标准化常见的编码名称
+        charset_mapping = {
+            'gb2312': 'gb2312',
+            'gbk': 'gbk', 
+            'gb18030': 'gb18030',
+            'utf-8': 'utf-8',
+            'iso-8859-1': 'iso-8859-1'
+        }
+        return charset_mapping.get(charset, charset)
+    
+    return None
+
+
+def extract_charset_from_html(data: bytes) -> Optional[str]:
+    """
+    从HTML前8KB检测meta标签中的编码信息
+    
+    Args:
+        data: HTML字节数据
+        
+    Returns:
+        Optional[str]: 提取到的编码名称，如果未找到则返回None
+    """
+    # 只检查前8KB内容以提升性能
+    sample = data[:8192]
+    
+    try:
+        # 尝试用ASCII解码来查找meta标签
+        sample_str = sample.decode('ascii', errors='ignore')
+    except:
+        return None
+    
+    # 查找各种形式的charset声明
+    patterns = [
+        r'<meta[^>]+charset\s*=\s*["\']?([^"\'>;\s]+)',  # <meta charset="...">
+        r'<meta[^>]+content\s*=\s*["\'][^"\']*charset=([^"\'>;\s]+)',  # <meta http-equiv content="...charset=...">
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, sample_str, re.IGNORECASE)
+        if match:
+            charset = match.group(1).lower()
+            # 标准化常见的编码名称
+            charset_mapping = {
+                'gb2312': 'gb2312',
+                'gbk': 'gbk',
+                'gb18030': 'gb18030', 
+                'utf-8': 'utf-8',
+                'iso-8859-1': 'iso-8859-1'
+            }
+            return charset_mapping.get(charset, charset)
+    
+    return None
+
+
+def try_decode_with_fallback(data: bytes, encoding: Optional[str] = None) -> str:
+    """
+    使用降级链进行解码尝试
+    
+    Args:
+        data: 要解码的字节数据
+        encoding: 优先尝试的编码（可选）
+        
+    Returns:
+        str: 解码后的字符串
+    """
+    # 中文编码降级链：GB2312 → GBK → GB18030 → UTF-8
+    fallback_encodings = ['gb2312', 'gbk', 'gb18030', 'utf-8']
+    
+    # 如果提供了特定编码，优先尝试
+    encodings_to_try = []
+    if encoding:
+        encodings_to_try.append(encoding)
+    
+    # 添加降级链中未包含的编码
+    for enc in fallback_encodings:
+        if enc != encoding:
+            encodings_to_try.append(enc)
+    
+    # 最后尝试一些其他常见编码
+    encodings_to_try.extend(['iso-8859-1', 'windows-1252'])
+    
+    for enc in encodings_to_try:
+        try:
+            decoded = data.decode(enc)
+            # 简单检查解码质量：如果包含常见的中文字符且没有明显乱码标志，认为解码成功
+            if enc in ['gb2312', 'gbk', 'gb18030']:
+                # 对于中文编码，检查是否有合理的中文字符
+                if re.search(r'[\u4e00-\u9fff]', decoded):
+                    return decoded
+            else:
+                # 对于其他编码，检查是否有明显的乱码
+                if not re.search(r'�', decoded):
+                    return decoded
+        except (UnicodeDecodeError, LookupError):
+            continue
+    
+    # 如果所有编码都失败，使用UTF-8并忽略错误
+    return data.decode('utf-8', errors='ignore')
+
+
+def smart_decode(data: bytes, response=None) -> str:
+    """
+    智能解码函数，支持多种编码检测
+    优先级：HTTP头 > HTML meta > 降级链
+    
+    Args:
+        data: 要解码的字节数据
+        response: HTTP响应对象（可选）
+        
+    Returns:
+        str: 解码后的字符串
+    """
+    detected_encoding = None
+    
+    # 1. 从HTTP响应头提取charset
+    if response:
+        detected_encoding = extract_charset_from_headers(response)
+        if detected_encoding:
+            logging.debug(f"Detected encoding from headers: {detected_encoding}")
+    
+    # 2. 如果HTTP头没有找到，从HTML meta标签检测
+    if not detected_encoding:
+        detected_encoding = extract_charset_from_html(data)
+        if detected_encoding:
+            logging.debug(f"Detected encoding from HTML meta: {detected_encoding}")
+    
+    # 3. 使用降级链解码
+    try:
+        return try_decode_with_fallback(data, detected_encoding)
+    except Exception as e:
+        logging.warning(f"Smart decode failed, falling back to UTF-8: {e}")
+        return data.decode('utf-8', errors='ignore')
+
+
+def fetch_html_original(url: str, ua: Optional[str] = None, timeout: int = 30) -> tuple[str, FetchMetrics, str]:
+    """
+    Fetch HTML using urllib with enhanced SSL error handling.
+
+    Returns:
+        tuple[str, FetchMetrics, str]: (html_content, fetch_metrics, final_url)
+                                       final_url is the URL after following redirects
+    """
+    metrics = FetchMetrics(primary_method="urllib")
+    ua = ua or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0 Safari/537.36"
+    req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept-Language": "zh-CN,zh;q=0.9"})
+    
+    try:
+        # Use unverified SSL context for sites with legacy SSL configurations
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context_unverified) as r:
+            try:
+                data = r.read(MAX_PAGE_SIZE)  # Limit read size
+                # Check if there's more data and truncate if needed
+                remaining = r.read(1)
+                if remaining:
+                    logging.warning(f"Page truncated at {MAX_PAGE_SIZE} bytes: {url}")
+            except http_client.IncompleteRead as e:
+                logging.warning(f"Incomplete read, using partial data: {len(e.partial or b'')} bytes")
+                data = (e.partial or b"")
+            # 使用智能解码替代简单的UTF-8解码
+            html = smart_decode(data, r)
+
+          
+            final_url = r.geturl()
+            
+
+            metrics.final_status = "success"
+            return html, metrics, final_url
+            
+    except Exception as e:
+        # If SSL error, provide enhanced error reporting
+        if "SSL" in str(e) or "CERTIFICATE" in str(e).upper():
+            error_msg = f"SSL verification failed for {url}. Consider using different SSL handling."
+            logging.error(error_msg)
+            metrics.final_status = "failed"
+            metrics.error_message = error_msg
+            raise
+
+        logging.error(f"Failed to fetch HTML from {url}: {e}")
+        metrics.final_status = "failed"
+        metrics.error_message = str(e)
+        raise
+
+# Public interface - using direct urllib with retry fallback
+fetch_html = fetch_html_with_retry
+fetch_html_with_metrics = fetch_html_with_retry
+
+
+def resolve_final_url(url: str, ua: Optional[str] = None, timeout: int = 10, max_redirects: int = 5) -> tuple[str, bool]:
+    """
+    Resolves URL redirects to get the final destination URL using HEAD requests.
+    
+    Args:
+        url: Original URL to resolve
+        ua: User agent string (optional)
+        timeout: Request timeout in seconds
+        max_redirects: Maximum number of redirects to follow
+        
+    Returns:
+        tuple[str, bool]: (final_url, was_redirected)
+    """
+    if not url or not url.strip():
+        raise ValueError("URL cannot be empty")
+    
+    ua = ua or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0 Safari/537.36"
+    current_url = url.strip()
+    redirect_count = 0
+    was_redirected = False
+    
+    try:
+        while redirect_count < max_redirects:
+            logging.debug(f"Checking redirect for: {current_url}")
+            
+            # Create HEAD request to check for redirects
+            req = urllib.request.Request(current_url, headers={
+                "User-Agent": ua,
+                "Accept-Language": "zh-CN,zh;q=0.9"
+            })
+            req.get_method = lambda: 'HEAD'
+            
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_context_unverified) as response:
+                    # If we get here without exception, no redirect occurred
+                    final_url = response.geturl()
+                    if final_url != current_url:
+                        was_redirected = True
+                        logging.info(f"URL resolved via response: {url} -> {final_url}")
+                    return final_url, was_redirected
+                    
+            except urllib.error.HTTPError as e:
+                # Check if it's a redirect status code
+                if e.code in (301, 302, 303, 307, 308):
+                    location = e.headers.get('Location')
+                    if not location:
+                        # No location header, return current URL
+                        return current_url, was_redirected
+                    
+                    # Handle relative URLs
+                    if location.startswith('/'):
+                        parsed = urllib.parse.urlparse(current_url)
+                        location = f"{parsed.scheme}://{parsed.netloc}{location}"
+                    elif not location.startswith(('http://', 'https://')):
+                        # Relative URL, resolve against current URL
+                        location = urllib.parse.urljoin(current_url, location)
+                    
+                    logging.debug(f"Redirect {e.code}: {current_url} -> {location}")
+                    current_url = location
+                    redirect_count += 1
+                    was_redirected = True
+                    continue
+                else:
+                    # Non-redirect HTTP error, return current URL
+                    logging.warning(f"HTTP error {e.code} for {current_url}")
+                    return current_url, was_redirected
+                    
+            except Exception as e:
+                logging.warning(f"Error resolving redirects for {current_url}: {e}")
+                return current_url, was_redirected
+        
+        # Max redirects exceeded
+        logging.warning(f"Max redirects ({max_redirects}) exceeded for {url}")
+        return current_url, was_redirected
+        
+    except Exception as e:
+        logging.error(f"Failed to resolve URL {url}: {e}")
+        return url, False
+
+
+def resolve_final_url_with_fallback(url: str, ua: Optional[str] = None, timeout: int = 10, max_redirects: int = 5) -> tuple[str, bool]:
+    """
+    Enhanced redirect resolver with fallback strategies for problematic redirect services.
+    
+    Some redirect services (like xhslink.com) return 404 on HEAD requests but work with GET.
+    This function implements a fallback strategy for such services.
+    
+    Args:
+        url: Original URL to resolve
+        ua: User agent string (optional)
+        timeout: Request timeout in seconds
+        max_redirects: Maximum number of redirects to follow
+        
+    Returns:
+        tuple[str, bool]: (final_url, was_redirected)
+    """
+    if not url or not url.strip():
+        raise ValueError("URL cannot be empty")
+
+    ua = ua or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0 Safari/537.36"
+
+    # === IMMEDIATE ROUTING: Skip redirect resolution for SSL problematic domains ===
+    # === 即刻路由：跳过SSL问题域名的重定向解析 ===
+    from webfetcher.config.ssl_problematic_domains import should_use_selenium_directly
+    if should_use_selenium_directly(url):
+        print(f"🚀 Skipping redirect resolution for known problematic domain: {url}", file=sys.stderr)
+        logging.info(f"🚀 Skipping redirect resolution for known problematic domain: {url}")
+        return url, False  # Return original URL, no redirect
+
+    current_url = url.strip()
+    redirect_count = 0
+    was_redirected = False
+
+    # Check if this is a known problematic redirect service
+    parsed_original = urllib.parse.urlparse(current_url)
+    is_known_redirect_service = parsed_original.hostname and 'xhslink.com' in parsed_original.hostname
+    
+    # For known problematic services, try GET-based resolution immediately
+    if is_known_redirect_service:
+        logging.debug(f"Using GET-based redirect resolution for known service: {parsed_original.hostname}")
+        return resolve_redirects_with_get(current_url, ua, timeout, max_redirects)
+    
+    # First attempt: Use the standard HEAD-based resolution
+    try:
+        final_url, was_redirected = resolve_final_url(current_url, ua, timeout, max_redirects)
+        return final_url, was_redirected
+    except Exception as e:
+        logging.debug(f"Standard redirect resolution failed for {current_url}: {e}")
+        
+        # Check if this might be a redirect service that blocks HEAD requests
+        if "404" in str(e) or "HTTP Error 404" in str(e):
+            parsed = urllib.parse.urlparse(current_url)
+            hostname = parsed.hostname or ""
+            
+            # Heuristic: domains that might be redirect services
+            redirect_indicators = ['link', 'short', 'redirect', 'go', 'r', 'l']
+            might_be_redirect_service = any(indicator in hostname.lower() for indicator in redirect_indicators)
+            
+            if might_be_redirect_service:
+                logging.info(f"404 response detected on potential redirect service {hostname}, attempting GET fallback")
+                try:
+                    return resolve_redirects_with_get(current_url, ua, timeout, max_redirects)
+                except Exception as fallback_error:
+                    logging.warning(f"GET fallback also failed for {current_url}: {fallback_error}")
+                    return current_url, False
+        
+        # For other errors, return original URL
+        logging.warning(f"Redirect resolution failed for {current_url}: {e}")
+        return current_url, False
+
+
+def resolve_redirects_with_get(url: str, ua: str, timeout: int, max_redirects: int) -> tuple[str, bool]:
+    """
+    Resolve redirects using GET requests instead of HEAD.
+    
+    This is a fallback for services that return 404 on HEAD but work with GET.
+    
+    Args:
+        url: URL to resolve
+        ua: User agent string
+        timeout: Request timeout
+        max_redirects: Maximum redirects to follow
+        
+    Returns:
+        tuple[str, bool]: (final_url, was_redirected)
+    """
+    current_url = url
+    redirect_count = 0
+    was_redirected = False
+    
+    while redirect_count < max_redirects:
+        logging.debug(f"GET-based redirect check for: {current_url}")
+        
+        try:
+            req = urllib.request.Request(current_url, headers={
+                "User-Agent": ua,
+                "Accept-Language": "zh-CN,zh;q=0.9"
+            })
+            
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context_unverified) as response:
+                final_url = response.geturl()
+                if final_url != current_url:
+                    was_redirected = True
+                    logging.info(f"GET-based redirect resolved: {url} -> {final_url}")
+                return final_url, was_redirected
+                
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                location = e.headers.get('Location')
+                if not location:
+                    return current_url, was_redirected
+                
+                # Handle relative URLs
+                if location.startswith('/'):
+                    parsed = urllib.parse.urlparse(current_url)
+                    location = f"{parsed.scheme}://{parsed.netloc}{location}"
+                elif not location.startswith(('http://', 'https://')):
+                    location = urllib.parse.urljoin(current_url, location)
+                
+                logging.debug(f"GET-based redirect {e.code}: {current_url} -> {location}")
+                current_url = location
+                redirect_count += 1
+                was_redirected = True
+                continue
+            else:
+                # Non-redirect HTTP error
+                logging.warning(f"GET-based resolution HTTP error {e.code} for {current_url}")
+                return current_url, was_redirected
+                
+        except Exception as e:
+            logging.warning(f"GET-based resolution error for {current_url}: {e}")
+            return current_url, was_redirected
+    
+    # Max redirects exceeded
+    logging.warning(f"Max redirects ({max_redirects}) exceeded in GET-based resolution for {url}")
+    return current_url, was_redirected
+
+
+def get_effective_host(url: str, ua: Optional[str] = None) -> str:
+    """
+    Gets the effective hostname after resolving redirects.
+    Implements caching for performance.
+
+    Args:
+        url: Original URL
+        ua: User agent string (optional)
+
+    Returns:
+        str: Effective hostname for parser selection
+    """
+    # === IMMEDIATE ROUTING: Skip resolution for SSL problematic domains ===
+    # === 即刻路由：跳过SSL问题域名的解析 ===
+    from webfetcher.config.ssl_problematic_domains import should_use_selenium_directly
+    if should_use_selenium_directly(url):
+        print(f"🚀 Using original hostname for known problematic domain: {url}", file=sys.stderr)
+        logging.info(f"🚀 Using original hostname for known problematic domain: {url}")
+        return urllib.parse.urlparse(url).hostname or ''
+
+    try:
+        final_url, was_redirected = resolve_final_url_with_fallback(url, ua=ua, timeout=10)
+        if was_redirected:
+            logging.info(f"Redirect resolved for parser selection: {url} -> {final_url}")
+        return urllib.parse.urlparse(final_url).hostname or ''
+    except Exception as e:
+        logging.warning(f"Failed to resolve redirects for parser selection: {e}")
+        # Fallback to original URL parsing
+        return urllib.parse.urlparse(url).hostname or ''
+
+
+def try_render_with_metrics(url: str, ua: Optional[str] = None, timeout_ms: int = 60000) -> tuple[Optional[str], FetchMetrics]:
+    """
+    Try to render page with Playwright and track metrics.
+    
+    Returns:
+        tuple[Optional[str], FetchMetrics]: (html_content, fetch_metrics)
+    """
+    metrics = FetchMetrics(primary_method="playwright")
+    start_time = time.time()
+    
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        metrics.render_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = f"Playwright not available: {e}"
+        return None, metrics
+        
+    html = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-blink-features=AutomationControlled'])
+            ctx = browser.new_context(user_agent=ua or 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148', locale='zh-CN', viewport={'width':390,'height':844}, device_scale_factor=3)
+            page = ctx.new_page()
+            page.set_extra_http_headers({'Accept-Language':'zh-CN,zh;q=0.9'})
+            # Relaxed waiting strategy to avoid networkidle stalls
+            page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+            page.wait_for_load_state('load', timeout=timeout_ms)
+            page.wait_for_timeout(800)
+            try:
+                page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                page.wait_for_timeout(600)
+            except Exception:
+                pass
+            html = page.content()
+            ctx.close(); browser.close()
+            
+        metrics.render_duration = time.time() - start_time
+        metrics.final_status = "success"
+        return html, metrics
+        
+    except Exception as e:
+        metrics.render_duration = time.time() - start_time
+        metrics.final_status = "failed"
+        metrics.error_message = str(e)
+        return None, metrics
+
+
+def try_render(url: str, ua: Optional[str] = None, timeout_ms: int = 60000) -> Optional[str]:
+    """Legacy interface for try_render"""
+    html, _ = try_render_with_metrics(url, ua, timeout_ms)
+    return html
+
+
+
+
+
+
+
+
+
+
+
+
+def ensure_unique_path(outdir: Path, base: str) -> Path:
+    p = outdir / f"{base}.md"
+    if not p.exists():
+        return p
+    n = 2
+    while True:
+        cand = outdir / f"{base} ({n}).md"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+# WeChat parser moved to parsers module
+# Import above: from webfetcher.parsing.parser import wechat_to_markdown
+
+class PageType(Enum):
+    """页面类型枚举"""
+    ARTICLE = "article"      # 文章页面
+    LIST_INDEX = "list"      # 列表索引页面
+
+
+# XiaoHongShu parser moved to parsers module
+# Import above: from webfetcher.parsing.parser import xhs_to_markdown
+
+def detect_page_type(html: str, url: Optional[str] = None, is_crawling: bool = False) -> PageType:
+    """
+    检测页面类型：文章页面还是列表索引页面
+    
+    检测策略：
+    1. 链接密度分析 - 计算链接数量与文本总量的比值
+    2. 列表容器识别 - 检测ul/ol/div[class*=list]等列表元素
+    3. 内容结构分析 - 判断是否包含大量相似格式的链接项
+    
+    Args:
+        html: 页面HTML内容
+        url: 页面URL，用于特定网站的优先判断
+        is_crawling: 是否在爬虫模式下，单页模式时跳过检测直接返回ARTICLE
+        
+    Returns:
+        PageType: ARTICLE 或 LIST_INDEX
+    """
+    # Mode-aware detection: Skip detection in single-page mode
+    if not is_crawling:
+        # Check for emergency disable via environment variable
+        if os.environ.get('WF_FORCE_PAGE_DETECTION', '').lower() == 'true':
+            logging.debug("WF_FORCE_PAGE_DETECTION is set, proceeding with detection")
+        else:
+            logging.debug("Single-page mode: defaulting to ARTICLE type")
+            return PageType.ARTICLE
+    else:
+        logging.debug("Crawl mode: performing full page type detection")
+    
+    # URL模式优先判断
+    if url:
+        # 12371.cn文章页面特征：包含日期路径和ARTI前缀
+        if re.search(r'12371\.cn/\d{4}/\d{2}/\d{2}/ARTI\d+\.shtml', url):
+            logging.debug(f"12371.cn article pattern detected: {url}")
+            return PageType.ARTICLE
+    
+    # 1. 提取所有链接
+    link_pattern = r'<a[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
+    links = re.findall(link_pattern, html, re.I | re.S)
+    
+    # 2. 计算页面文本总量（去除HTML标签）
+    # 移除脚本和样式
+    clean_html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.I | re.S)
+    clean_html = re.sub(r'<style[^>]*>.*?</style>', '', clean_html, flags=re.I | re.S)
+    # 提取纯文本
+    text_content = re.sub(r'<[^>]+>', ' ', clean_html)
+    text_content = ihtml.unescape(text_content)
+    total_text_length = len(text_content.strip())
+    
+    # 3. 计算有效链接数量（排除导航、页脚等）
+    content_links = []
+    anchor_links = []  # 添加锚点链接列表
+    for href, link_text in links:
+        link_text_clean = re.sub(r'<[^>]+>', '', link_text).strip()
+        # 识别锚点链接
+        if href.startswith('#'):
+            anchor_links.append((href, link_text_clean))
+        # 过滤掉明显的导航链接（放宽条件）
+        elif (len(link_text_clean) > 2 and  # 降低最小长度要求
+            not any(nav_word in link_text_clean.lower() for nav_word in 
+                   ['首页', '返回', '登录', '注册', 'home', 'back', 'login', 'register']) and
+            not link_text_clean.lower() in ['更多', '更多>>']):  # 分别检查常见的短导航词
+            content_links.append((href, link_text_clean))
+    
+    # 4. 计算链接密度
+    link_density = len(content_links) / max(total_text_length, 1) * 1000  # 每1000字符的链接数
+    
+    # 5. 检测列表容器
+    list_containers = [
+        r'<ul[^>]*class=["\'][^"\']*list[^"\']*["\']',  # ul.list*
+        r'<ol[^>]*class=["\'][^"\']*list[^"\']*["\']',  # ol.list*
+        r'<div[^>]*class=["\'][^"\']*list[^"\']*["\']', # div.list*
+        r'<div[^>]*class=["\'][^"\']*index[^"\']*["\']', # div.index*
+        r'<div[^>]*class=["\'][^"\']*content-list[^"\']*["\']', # div.content-list*
+        r'<div[^>]*id=["\'][^"\']*list[^"\']*["\']',    # div#list*
+        r'<table[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>.*?</td>.*?<td[^>]*>.*?</td>', # 三列表格
+    ]
+    
+    list_container_count = 0
+    for pattern in list_containers:
+        if re.search(pattern, html, re.I):
+            list_container_count += 1
+    
+    # 6. 检测重复链接模式（相似的链接文本长度和格式）
+    if len(content_links) >= 5:
+        link_lengths = [len(text) for _, text in content_links]
+        avg_length = sum(link_lengths) / len(link_lengths)
+        # 检查链接文本长度的一致性
+        similar_length_links = sum(1 for length in link_lengths 
+                                 if abs(length - avg_length) <= avg_length * 0.5)
+        pattern_consistency = similar_length_links / len(content_links)
+    else:
+        pattern_consistency = 0
+    
+    # 6.5. 锚点链接比例判定（解决章节导航误判问题）
+    all_links = links
+    if len(all_links) > 0:
+        anchor_ratio = len(anchor_links) / len(all_links)
+        
+        # 如果锚点链接占比超过30%，或者锚点链接数量>=10，很可能是文章页面的章节导航
+        if anchor_ratio > 0.3 or len(anchor_links) >= 10:
+            return PageType.ARTICLE
+        
+        # 如果有较多锚点链接（如章节导航），降低列表页判定权重
+        if len(anchor_links) >= 5:
+            # 减少有效链接计数，避免误判
+            content_links = content_links[:max(len(content_links)//2, 1)]
+    
+    # 7. 决策逻辑
+    # 强列表信号：
+    # - 高链接密度 (>1.5个链接/1000字符)
+    # - 存在列表容器
+    # - 链接模式一致性高 (>50%)
+    # - 链接数量多 (>=5个)
+    
+    is_list_page = (
+        (link_density > 1.5 and len(content_links) >= 5) or  # 降低密度要求
+        (list_container_count >= 2) or  # 多个列表容器
+        (len(content_links) >= 8 and pattern_consistency > 0.5) or  # 降低一致性要求
+        (link_density > 1.0 and list_container_count >= 1 and len(content_links) >= 5) or  # 降低综合判断阈值
+        (list_container_count >= 1 and len(content_links) >= 10)  # 如果有列表容器且链接多，直接判定为列表
+    )
+    
+    # 调试信息（可选）
+    logging.debug(f"Links - Total: {len(all_links)}, Content: {len(content_links)}, Anchor: {len(anchor_links)}")
+    logging.debug(f"Page type detection - Links: {len(content_links)}, "
+                 f"Density: {link_density:.2f}, "
+                 f"List containers: {list_container_count}, "
+                 f"Pattern consistency: {pattern_consistency:.2f}, "
+                 f"Result: {'LIST' if is_list_page else 'ARTICLE'}")
+    
+    return PageType.LIST_INDEX if is_list_page else PageType.ARTICLE
+
+
+@dataclass
+class ListItem:
+    """列表项数据结构"""
+    title: str
+    url: str
+    date: Optional[str] = None
+    summary: Optional[str] = None
+    index: Optional[int] = None
+
+
+def extract_list_content(html: str, base_url: str) -> tuple[str, List[ListItem]]:
+    """
+    从列表页面提取列表项内容
+    
+    提取策略：
+    1. 识别主要列表容器
+    2. 提取每个列表项的标题、链接、日期、摘要
+    3. 清理和标准化数据
+    
+    Args:
+        html: 页面HTML内容
+        base_url: 基础URL，用于解析相对链接
+        
+    Returns:
+        tuple: (页面标题, 列表项列表)
+    """
+    # 性能保护机制：内容大小和复杂度检测
+    html_size = len(html)
+    if html_size > 5 * 1024 * 1024:  # 超过5MB的HTML
+        print(f"Warning: Large HTML content ({html_size // 1024}KB), using simplified processing")
+    
+    # 表格复杂度检测
+    table_count = len(re.findall(r'<table[^>]*>', html, re.I))
+    tr_count = len(re.findall(r'<tr[^>]*>', html, re.I))
+    td_count = len(re.findall(r'<td[^>]*>', html, re.I))
+    
+    # 设置处理超时
+    def timeout_handler(_, __):
+        raise TimeoutError("List content extraction timeout after 5 seconds")
+    
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(5)  # 5秒超时
+    
+    try:
+        # 1. 提取页面标题
+        page_title = parsers.extract_meta(html, 'og:title') or parsers.extract_meta(html, 'twitter:title')
+        if not page_title:
+            title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.I | re.S)
+            if title_match:
+                page_title = ihtml.unescape(re.sub(r'<[^>]+>', '', title_match.group(1))).strip()
+        page_title = page_title or '列表页面'
+        
+        # 检查是否为人民网，使用特殊处理策略
+        is_people_site = 'cpc.people.com.cn' in base_url or 'people.com.cn' in base_url
+        
+        # 表格数量过多时使用简化策略
+        if td_count > 500:
+            print(f"Warning: Too many table cells ({td_count}), limiting to first 500")
+            # 截断HTML以减少处理量
+            html = html[:len(html)//2] if len(html) > 1024*1024 else html
+        
+        # 2. 定义多种列表项提取模式，针对不同网站结构
+        list_patterns = []
+        
+        # 对于人民网使用优化的分步处理策略
+        if is_people_site:
+            list_patterns.append({
+                'container': r'<table[^>]*>(.*?)</table>',
+                'item': 'people_table_optimized',  # 标记使用优化处理
+                'title_link': None,
+                'date': r'(\d{4}年\d{1,2}月\d{1,2}日)',
+                'special': 'people_table_optimized'
+            })
+        else:
+            # 人民网政治局会议表格专用模式（原始版本，仅用于非人民网站点）
+            list_patterns.append({
+                'container': r'<table[^>]*>(.*?)</table>',
+                'item': r'<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>.*?<center>(.*?)</center>.*?</td>.*?<td[^>]*>(.*?)</td>.*?</tr>',
+                'title_link': None,  # 特殊处理
+                'date': r'(\d{4}年\d{1,2}月\d{1,2}日)',
+                'special': 'people_table'
+            })
+        
+        # 添加通用模式
+        list_patterns.extend([
+            # 通用表格形式的列表
+            {
+                'container': r'<table[^>]*>(.*?)</table>',
+                'item': r'<tr[^>]*>(.*?)</tr>',
+                'title_link': r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>',
+                'date': r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})'
+            },
+            # 人民网等新闻网站的典型结构
+            {
+                'container': r'<ul[^>]*class=["\'][^"\']*list[^"\']*["\'][^>]*>(.*?)</ul>',
+                'item': r'<li[^>]*>(.*?)</li>',
+                'title_link': r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>',
+                'date': r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})'
+            },
+            # 带有div包装的列表项
+            {
+                'container': r'<div[^>]*class=["\'][^"\']*list[^"\']*["\'][^>]*>(.*?)</div>',
+                'item': r'<div[^>]*class=["\'][^"\']*item[^"\']*["\'][^>]*>(.*?)</div>',
+                'title_link': r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>',
+                'date': r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})'
+            },
+            # 通用链接提取（作为后备方案）
+            {
+                'container': r'<body[^>]*>(.*?)</body>',
+                'item': r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>',
+                'title_link': None,  # 已在item中处理
+                'date': r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})'
+            }
+        ])
+        
+        list_items = []
+        
+        # 3. 尝试每种模式提取列表项
+        for pattern_config in list_patterns:
+            container_match = re.search(pattern_config['container'], html, re.I | re.S)
+            if container_match:
+                container_content = container_match.group(1)
+                
+                # 优化的人民网表格处理
+                if pattern_config.get('special') == 'people_table_optimized':
+                    # 分步处理，避免复杂正则表达式的灾难性回溯
+                    # 1. 先提取所有表格行
+                    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', container_content, re.I | re.S)
+                    row_count = 0
+                    for row_html in rows:
+                        row_count += 1
+                        if row_count > 50:  # 限制处理行数
+                            print(f"Warning: Too many table rows, stopping at {row_count}")
+                            break
+                            
+                        # 2. 从每行中提取单元格
+                        cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.I | re.S)
+                        if len(cells) >= 3:  # 确保有足够的单元格
+                            # 3. 分别处理日期和内容单元格
+                            for i, cell in enumerate(cells):
+                                if i >= 2:  # 只处理前3个单元格
+                                    break
+                                # 寻找包含center标签的单元格（通常是日期）
+                                center_match = re.search(r'<center[^>]*>(.*?)</center>', cell, re.I | re.S)
+                                if center_match:
+                                    date_text = center_match.group(1)
+                                    date = re.sub(r'<[^>]+>', '', date_text).strip()
+                                    date = ihtml.unescape(date)
+                                    
+                                    # 从下一个单元格中提取内容
+                                    if i + 1 < len(cells):
+                                        content_cell = cells[i + 1]
+                                        link_match = re.search(r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>', content_cell, re.I | re.S)
+                                        if link_match:
+                                            href = link_match.group(1)
+                                            link_text = re.sub(r'<[^>]+>', '', link_match.group(2)).strip()
+                                            
+                                            # 构建标题
+                                            title = f"中央政治局会议 {date}"
+                                            
+                                            if title and href:
+                                                full_url = resolve_url_with_context(base_url, href)
+                                                list_items.append(ListItem(
+                                                    title=title,
+                                                    url=full_url,
+                                                    date=date,
+                                                    summary=None,
+                                                    index=len(list_items) + 1
+                                                ))
+                                    break  # 找到一个有效的日期单元格后跳出
+                
+                # 特殊处理人民网表格格式（原始版本）
+                elif pattern_config.get('special') == 'people_table':
+                    # 人民网政治局会议特殊表格处理
+                    items = re.findall(pattern_config['item'], container_content, re.I | re.S)
+                    for date_text, content_html in items:
+                        # 清理日期
+                        date = re.sub(r'<[^>]+>', '', date_text).strip()
+                        date = ihtml.unescape(date)
+                        
+                        # 提取链接
+                        link_match = re.search(r'<a[^>]*href=["\']([^"\']+)["\'][^>]*[^>]*>(.*?)</a>', content_html, re.I | re.S)
+                        if link_match:
+                            href = link_match.group(1)
+                            link_text = re.sub(r'<[^>]+>', '', link_match.group(2)).strip()
+                        else:
+                            # 如果没有链接，跳过这项
+                            continue
+                        
+                        # 清理内容作为摘要
+                        summary_text = re.sub(r'<a[^>]*>.*?</a>', '', content_html, flags=re.I | re.S)
+                        summary_text = re.sub(r'<[^>]+>', ' ', summary_text)
+                        summary_text = ihtml.unescape(summary_text).strip()
+                        summary = summary_text if len(summary_text) > 10 else None
+                        
+                        # 构建标题：会议名称 + 日期
+                        title = f"中央政治局会议 {date}"
+                        
+                        if title and href:
+                            full_url = resolve_url_with_context(base_url, href)
+                            list_items.append(ListItem(
+                                title=title,
+                                url=full_url,
+                                date=date,
+                                summary=summary,
+                                index=len(list_items) + 1
+                            ))
+                
+                elif pattern_config['title_link']:
+                    # 常规模式：先提取item，再提取链接
+                    items = re.findall(pattern_config['item'], container_content, re.I | re.S)
+                    for item_html in items:
+                        link_match = re.search(pattern_config['title_link'], item_html, re.I | re.S)
+                        if link_match:
+                            href = link_match.group(1)
+                            title_html = link_match.group(2)
+                            
+                            # 清理标题
+                            title = re.sub(r'<[^>]+>', '', title_html).strip()
+                            title = ihtml.unescape(title)
+                            
+                            # 提取日期
+                            date_match = re.search(pattern_config['date'], item_html)
+                            date = date_match.group(1) if date_match else None
+                            
+                            # 提取摘要（链接外的其他文本）
+                            summary_text = re.sub(r'<a[^>]*>.*?</a>', '', item_html, flags=re.I | re.S)
+                            summary_text = re.sub(r'<[^>]+>', ' ', summary_text)
+                            summary_text = ihtml.unescape(summary_text).strip()
+                            summary = summary_text if len(summary_text) > 10 else None
+                            
+                            if title and len(title) > 3:  # 过滤过短的标题
+                                full_url = resolve_url_with_context(base_url, href)
+                                list_items.append(ListItem(
+                                    title=title,
+                                    url=full_url,
+                                    date=date,
+                                    summary=summary,
+                                    index=len(list_items) + 1
+                                ))
+                else:
+                    # 直接链接模式：item就是链接
+                    items = re.findall(pattern_config['item'], container_content, re.I | re.S)
+                    for href, title_html in items:
+                        title = re.sub(r'<[^>]+>', '', title_html).strip()
+                        title = ihtml.unescape(title)
+                        
+                        # 过滤导航和无关链接
+                        if (len(title) > 5 and 
+                            not any(skip_word in title.lower() for skip_word in 
+                                   ['首页', '返回', '登录', '注册', 'home', 'back', 'login', 'register', 
+                                    '更多>>', '更多', '上一页', '下一页', 'prev', 'next'])):
+                            
+                            full_url = resolve_url_with_context(base_url, href)
+                            list_items.append(ListItem(
+                                title=title,
+                                url=full_url,
+                                date=None,
+                                summary=None,
+                                index=len(list_items) + 1
+                            ))
+        
+            # 如果找到足够的列表项，就停止尝试其他模式
+            if len(list_items) >= 5:
+                break
+        
+        # 4. 去重和排序
+        seen_urls = set()
+        unique_items = []
+        for item in list_items:
+            if item.url not in seen_urls:
+                seen_urls.add(item.url)
+                unique_items.append(item)
+        
+        # 限制数量，避免过多项目
+        if len(unique_items) > 50:
+            unique_items = unique_items[:50]
+        
+        # 重新编号
+        for i, item in enumerate(unique_items):
+            item.index = i + 1
+        
+        return page_title, unique_items
+        
+    except TimeoutError as e:
+        print(f"List extraction timed out: {e}")
+        return "页面处理超时", []
+    except Exception as e:
+        print(f"Error during list extraction: {e}")
+        return "列表页面", []
+    finally:
+        # 清理超时设置
+        signal.alarm(0)
+
+
+def format_list_page_markdown(page_title: str, list_items: List[ListItem], url: str) -> tuple[str, str, dict]:
+    """
+    将列表页面数据格式化为Markdown输出
+    
+    Args:
+        page_title: 页面标题
+        list_items: 列表项数据
+        url: 原始URL
+        
+    Returns:
+        tuple: (文件名用的日期, Markdown内容, 元数据)
+    """
+    # 生成文件名用的日期
+    date_only = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+    # 构建Markdown内容
+    lines = [
+        f"# {page_title}",
+        "",
+        f"**页面类型**: 列表索引",
+        f"**链接数量**: {len(list_items)}个",
+        f"**来源**: [{url}]({url})",
+        f"**抓取时间**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "## 内容列表",
+        ""
+    ]
+    
+    # 添加每个列表项
+    for item in list_items:
+        lines.append(f"### {item.index}. {item.title}")
+        lines.append(f"- **链接**: [{item.url}]({item.url})")
+        
+        if item.date:
+            lines.append(f"- **日期**: {item.date}")
+        
+        if item.summary:
+            lines.append(f"- **摘要**: {item.summary}")
+        
+        lines.append("")
+    
+    # 元数据
+    metadata = {
+        'title': page_title,
+        'url': url,
+        'type': 'list_index',
+        'item_count': len(list_items),
+        'extracted_at': datetime.datetime.now().isoformat(),
+        'items': [
+            {
+                'title': item.title,
+                'url': item.url,
+                'date': item.date,
+                'summary': item.summary
+            }
+            for item in list_items
+        ]
+    }
+    
+    return date_only, "\n".join(lines), metadata
+
+
+# Generic parser moved to parsers module
+# Import above: from webfetcher.parsing.parser import generic_to_markdown
+
+
+def find_next_url(html: str, current_url: str, parser_name: str) -> Optional[str]:
+    """Find next page URL based on parser type."""
+    if 'mkdocs' in parser_name.lower():
+        return find_mkdocs_next_url(html, current_url)
+    elif 'docusaurus' in parser_name.lower():
+        return find_docusaurus_next_url(html, current_url)
+    return None
+
+def find_mkdocs_next_url(html: str, current_url: str) -> Optional[str]:
+    """Find next URL in MkDocs navigation."""
+    patterns = [
+        r'<a[^>]+class=["\'][^"\']*md-footer-nav__link--next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*md-footer-nav__link--next[^"\']*["\']',
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>[\s\S]*?Next[\s\S]*?</a>'
+    ]
+    for pat in patterns:
+        m = re.search(pat, html, re.I)
+        if m:
+            next_url = m.group(1)
+            # Skip same-page anchors and relative anchors
+            if next_url.startswith('#'):
+                continue
+            full_url = resolve_url_with_context(current_url, next_url)
+            # Skip if it's the same URL (just with different anchor)
+            if full_url.split('#')[0] == current_url.split('#')[0]:
+                continue
+            return full_url
+    return None
+
+def find_docusaurus_next_url(html: str, current_url: str) -> Optional[str]:
+    """Find next URL in Docusaurus navigation."""
+    patterns = [
+        r'<a[^>]+class=["\'][^"\']*pagination-nav__link--next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*pagination-nav__link--next[^"\']*["\']'
+    ]
+    for pat in patterns:
+        m = re.search(pat, html, re.I)
+        if m:
+            next_url = m.group(1)
+            # Skip same-page anchors and relative anchors
+            if next_url.startswith('#'):
+                continue
+            full_url = resolve_url_with_context(current_url, next_url)
+            # Skip if it's the same URL (just with different anchor)
+            if full_url.split('#')[0] == current_url.split('#')[0]:
+                continue
+            return full_url
+    return None
+
+def is_same_section(current_url: str, next_url: str) -> bool:
+    """Check if next URL belongs to same documentation section."""
+    c_parts = urllib.parse.urlparse(current_url)
+    n_parts = urllib.parse.urlparse(next_url)
+    return (c_parts.netloc == n_parts.netloc and 
+            n_parts.path.startswith(c_parts.path.rsplit('/', 2)[0]))
+
+def process_pagination(initial_url: str, initial_html: str, parser_func, ua: str) -> list:
+    """Follow pagination links and collect all pages."""
+    visited = set()
+    pages = []
+    current_url = initial_url
+    current_html = initial_html
+    depth = 0
+    
+    while depth < MAX_PAGINATION_DEPTH and current_url not in visited:
+        try:
+            visited.add(current_url)
+            logging.info(f"Processing page {depth + 1}: {current_url}")
+            pages.append(parser_func(current_html, current_url))
+            
+            next_url = find_next_url(current_html, current_url, parser_func.__name__)
+            if not next_url or not is_same_section(current_url, next_url):
+                logging.info(f"Pagination stopped: {'no next URL' if not next_url else 'different section'}")
+                break
+                
+            logging.info(f"Following pagination to: {next_url}")
+            current_html, _ = fetch_html(next_url, ua=ua, timeout=30)  # Fix: properly unpack tuple return value
+            current_url = next_url
+            depth += 1
+            
+        except Exception as e:
+            logging.warning(f"Pagination stopped at depth {depth}: {e}")
+            break
+    
+    return pages
+
+def aggregate_multi_page_content(pages: list) -> tuple[str, str, dict]:
+    """Merge multiple page contents into single markdown document."""
+    if not pages:
+        return '', '', {}
+    
+    first_date, first_content, first_metadata = pages[0]
+    if len(pages) == 1:
+        return first_date, first_content, first_metadata
+    
+    # Combine all content
+    all_content = [first_content]
+    all_images = list(first_metadata.get('images', []))
+    
+    for i in range(1, len(pages)):
+        date, content, metadata = pages[i]
+        # Extract body content (skip header metadata lines)
+        lines = content.split('\n')
+        body_start = 0
+        for j, line in enumerate(lines):
+            if line.strip() and not line.startswith('- ') and not line.startswith('#'):
+                body_start = j
+                break
+        
+        body_content = '\n'.join(lines[body_start:]).strip()
+        if body_content:
+            all_content.append(f"\n---\n\n{body_content}")
+        
+        # Aggregate images
+        all_images.extend(metadata.get('images', []))
+    
+    # Create combined metadata
+    combined_metadata = first_metadata.copy()
+    combined_metadata['images'] = list(set(all_images))
+    combined_metadata['pages_count'] = len(pages)
+    
+    return first_date, '\n'.join(all_content), combined_metadata
+
+
+def normalize_url_for_dedup(url: str) -> str:
+    """Normalize URL for deduplication: lowercase scheme and netloc only, preserve path case, remove fragments, sort query params."""
+    parsed = urllib.parse.urlparse(url)
+    
+    # Only lowercase the scheme and netloc (domain), preserve path case
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    
+    # Sort query parameters alphabetically
+    query_params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    sorted_query = urllib.parse.urlencode(sorted(query_params))
+    
+    # Normalize path (remove trailing slash except for root) - preserve case
+    path = parsed.path.rstrip('/') if parsed.path != '/' else parsed.path
+    
+    # Reconstruct URL without fragment - preserving original case for path, params
+    normalized = urllib.parse.urlunparse((
+        scheme, netloc, path, 
+        parsed.params, sorted_query, ''
+    ))
+    return normalized
+
+def should_crawl_url(url: str) -> bool:
+    """Smart filtering to skip binary files, APIs, and build artifacts."""
+    url_lower = url.lower()
+    parsed = urllib.parse.urlparse(url_lower)
+    path = parsed.path
+    
+    # Check file extensions
+    for ext_set in [BINARY_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS]:
+        if any(path.endswith(ext) for ext in ext_set):
+            return False
+    
+    # Check API and build patterns
+    for pattern_set in [API_PATTERNS, BUILD_PATTERNS]:
+        if any(pattern in url_lower for pattern in pattern_set):
+            return False
+    
+    return True
+
+def should_preserve_subdirectory(base_url: str) -> bool:
+    """Determine if the base URL represents a subdirectory deployment that should be preserved."""
+    base_parts = urllib.parse.urlparse(base_url)
+    path_segments = [s for s in base_parts.path.strip('/').split('/') if s]
+    
+    if not path_segments:
+        return False
+    
+    first_segment = path_segments[0]
+    
+    # GitHub Pages subdirectory deployments
+    if base_parts.netloc.endswith('.github.io'):
+        return True
+    
+    # Documentation sites with 'docs' in path
+    if 'docs' in first_segment.lower():
+        return True
+    
+    # Multi-level paths indicate subdirectory deployment
+    if len(path_segments) > 1:
+        return True
+    
+    # Sites with common project/documentation patterns
+    doc_patterns = ['project', 'manual', 'guide', 'api', 'reference', 'book']
+    if any(pattern in first_segment.lower() for pattern in doc_patterns):
+        return True
+    
+    return False
+
+def resolve_url_with_context(base_url: str, href: str) -> str:
+    """Smart URL resolution that preserves subdirectory context with enhanced edge case handling."""
+    base_parts = urllib.parse.urlparse(base_url)
+    
+    # Handle protocol-relative URLs (starting with //)
+    if href.startswith('//'):
+        return f"{base_parts.scheme}:{href}"
+    
+    # Special case: root navigation '/' should go to domain root
+    if href == '/':
+        return f"{base_parts.scheme}://{base_parts.netloc}/"
+    
+    # Handle absolute paths - they start from the domain root
+    if href.startswith('/'):
+        parsed_base = urllib.parse.urlparse(base_url)
+        return f"{parsed_base.scheme}://{parsed_base.netloc}{href}"
+    
+    # CRITICAL FIX: For relative paths (not starting with /), ensure base URL has trailing slash
+    # This is essential for correct urljoin behavior with subdirectory deployments
+    if not href.startswith('/') and base_parts.path and not base_parts.path.endswith('/'):
+        # Check if this looks like a directory URL (common for documentation sites)
+        # A URL without extension or ending with known directory patterns should be treated as directory
+        if not any(base_parts.path.endswith(ext) for ext in ['.html', '.htm', '.php', '.asp', '.jsp']):
+            # Add trailing slash to base URL for correct relative resolution
+            base_url_fixed = base_url + '/'
+            return urllib.parse.urljoin(base_url_fixed, href)
+    
+    # Default to standard urljoin for other cases
+    return urllib.parse.urljoin(base_url, href)
+
+def extract_internal_links(html: str, base_url: str, enable_doc_filter: bool = False) -> dict:
+    """Extract all internal links from HTML content with smart subdirectory resolution.
+    Returns dict mapping normalized URLs to original URLs for case-preserving fetching.
+    Enhanced to support both quoted and unquoted href attributes.
+    
+    Args:
+        html: HTML content to extract links from
+        base_url: Base URL for resolving relative links
+        enable_doc_filter: If True, apply is_documentation_url filter during extraction
+    """
+    links = {}  # normalized_url -> original_url
+    base_parts = urllib.parse.urlparse(base_url)
+    
+    # Support multiple href patterns for modern web compatibility
+    href_patterns = [
+        r'href\s*=\s*["\']([^"\']+)["\']',     # Quoted: href="..." or href='...' (优先)
+        r'href\s*=\s*([^"\'\s>][^\s>]*)',      # Unquoted: href=value (排除引号开头，避免重叠)
+    ]
+    
+    processed_hrefs = set()  # Avoid duplicate processing
+    
+    for pattern in href_patterns:
+        for match in re.finditer(pattern, html, re.I):
+            href = match.group(1)
+            
+            # Skip if already processed (to avoid duplicates from multiple patterns)
+            if href in processed_hrefs:
+                continue
+            processed_hrefs.add(href)
+            
+            # Skip empty hrefs or anchors, javascript, mailto
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+                
+            # Convert to absolute URL using smart context resolution
+            full_url = resolve_url_with_context(base_url, href)
+            url_parts = urllib.parse.urlparse(full_url)
+            
+            # Check if same domain and should crawl
+            if url_parts.netloc == base_parts.netloc and should_crawl_url(full_url):
+                # Apply documentation URL filter during extraction if enabled (Stage 1.1 optimization)
+                if enable_doc_filter and not is_documentation_url(full_url):
+                    continue
+                
+                # Map normalized URL to original URL for case-preserving fetching
+                normalized = normalize_url_for_dedup(full_url)
+                links[normalized] = full_url
+    
+    return links
+
+def is_documentation_url(url: str) -> bool:
+    """Filter URLs to likely documentation pages."""
+    # Skip common non-doc patterns
+    skip_patterns = [
+        r'/api/', r'/download', r'\.zip$', r'\.tar', r'\.pdf$',
+        r'/signin', r'/login', r'/auth', r'/search\?',
+        r'\.xml$', r'\.json$', r'/feed', r'/rss'
+    ]
+    
+    for pattern in skip_patterns:
+        if re.search(pattern, url, re.I):
+            return False
+    
+    return True  # Default: include
+
+# ============================================================================
+# Sitemap Discovery and Parsing Functions
+# ============================================================================
+
+def discover_sitemaps(base_url: str, ua: str) -> list:
+    """
+    Discover sitemap.xml files for a given base URL.
+    为给定的基础 URL 发现 sitemap.xml 文件。
+
+    Tries common sitemap locations:
+    尝试常见的 sitemap 位置：
+    - /sitemap.xml
+    - /sitemap_index.xml
+    - /sitemap-index.xml
+    - /sitemaps.xml
+
+    Args:
+        base_url: Base URL of the website (e.g., https://example.com)
+        ua: User agent string for requests
+
+    Returns:
+        List[str]: List of discovered sitemap URLs (empty if none found)
+    """
+    parsed = urllib.parse.urlparse(base_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+
+    common_sitemap_paths = [
+        '/sitemap.xml',
+        '/sitemap_index.xml',
+        '/sitemap-index.xml',
+        '/sitemaps.xml',
+        '/sitemap.xml.gz',
+    ]
+
+    discovered = []
+
+    for path in common_sitemap_paths:
+        sitemap_url = base + path
+
+        try:
+            # Try to fetch the sitemap with a HEAD request first
+            req = urllib.request.Request(sitemap_url, method='HEAD')
+            req.add_header('User-Agent', ua)
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    content_type = response.headers.get('Content-Type', '')
+                    # Accept text/xml, application/xml, or gzipped content
+                    if 'xml' in content_type or path.endswith('.gz'):
+                        discovered.append(sitemap_url)
+                        logging.info(f"Discovered sitemap: {sitemap_url}")
+        except Exception as e:
+            logging.debug(f"No sitemap at {sitemap_url}: {e}")
+            continue
+
+    if not discovered:
+        logging.info(f"No sitemaps found for {base_url}")
+
+    return discovered
+
+def parse_sitemap(sitemap_url: str, ua: str) -> list:
+    """
+    Parse sitemap.xml and extract URLs with metadata.
+    解析 sitemap.xml 并提取带元数据的 URL。
+
+    Supports:
+    - Regular sitemap.xml files
+    - Gzipped sitemap.xml.gz files
+    - Sitemap index files (references to other sitemaps)
+
+    Args:
+        sitemap_url: URL of the sitemap to parse
+        ua: User agent string for requests
+
+    Returns:
+        List[dict]: List of URL dictionaries with keys:
+            - url: The URL
+            - priority: Priority value (0.0-1.0, default 0.5)
+            - lastmod: Last modification date (ISO format string, or None)
+            - changefreq: Change frequency (e.g., 'daily', 'weekly', or None)
+    """
+    urls = []
+
+    try:
+        # Fetch sitemap content
+        req = urllib.request.Request(sitemap_url)
+        req.add_header('User-Agent', ua)
+
+        with urllib.request.urlopen(req, timeout=30) as response:
+            content = response.read()
+
+        # Handle gzipped sitemaps
+        if sitemap_url.endswith('.gz'):
+            try:
+                content = gzip.decompress(content)
+            except Exception as e:
+                logging.error(f"Failed to decompress gzipped sitemap {sitemap_url}: {e}")
+                return []
+
+        # Parse XML
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as e:
+            logging.error(f"Failed to parse sitemap XML {sitemap_url}: {e}")
+            return []
+
+        # Detect sitemap namespace (if any)
+        namespace_match = re.match(r'\{(.*)\}', root.tag)
+        ns = {'sm': namespace_match.group(1)} if namespace_match else {}
+
+        # Check if this is a sitemap index (contains <sitemap> tags)
+        if root.tag.endswith('sitemapindex'):
+            logging.info(f"Detected sitemap index: {sitemap_url}")
+
+            # Parse sitemap index - find all <sitemap> entries
+            sitemap_tags = root.findall('.//sm:sitemap/sm:loc', ns) if ns else root.findall('.//sitemap/loc')
+
+            for sitemap_tag in sitemap_tags:
+                sub_sitemap_url = sitemap_tag.text.strip()
+                logging.info(f"Found sub-sitemap: {sub_sitemap_url}")
+
+                # Recursively parse sub-sitemaps
+                sub_urls = parse_sitemap(sub_sitemap_url, ua)
+                urls.extend(sub_urls)
+
+        else:
+            # Parse regular sitemap - find all <url> entries
+            url_tags = root.findall('.//sm:url', ns) if ns else root.findall('.//url')
+
+            for url_tag in url_tags:
+                # Extract URL
+                loc_tag = url_tag.find('sm:loc', ns) if ns else url_tag.find('loc')
+                if loc_tag is None or not loc_tag.text:
+                    continue
+
+                url_str = loc_tag.text.strip()
+
+                # Extract priority (optional, default 0.5)
+                priority_tag = url_tag.find('sm:priority', ns) if ns else url_tag.find('priority')
+                priority = float(priority_tag.text) if priority_tag is not None and priority_tag.text else 0.5
+
+                # Extract lastmod (optional)
+                lastmod_tag = url_tag.find('sm:lastmod', ns) if ns else url_tag.find('lastmod')
+                lastmod = lastmod_tag.text.strip() if lastmod_tag is not None and lastmod_tag.text else None
+
+                # Extract changefreq (optional)
+                changefreq_tag = url_tag.find('sm:changefreq', ns) if ns else url_tag.find('changefreq')
+                changefreq = changefreq_tag.text.strip() if changefreq_tag is not None and changefreq_tag.text else None
+
+                urls.append({
+                    'url': url_str,
+                    'priority': priority,
+                    'lastmod': lastmod,
+                    'changefreq': changefreq
+                })
+
+            logging.info(f"Parsed {len(urls)} URLs from sitemap {sitemap_url}")
+
+    except urllib.error.HTTPError as e:
+        logging.error(f"HTTP error fetching sitemap {sitemap_url}: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        logging.error(f"URL error fetching sitemap {sitemap_url}: {e.reason}")
+    except Exception as e:
+        logging.error(f"Unexpected error parsing sitemap {sitemap_url}: {e}")
+
+    return urls
+
+def crawl_from_sitemap(start_url: str, ua: str, max_pages: int = 1000,
+                       delay: float = 0.5, **kwargs) -> list:
+    """
+    Crawl a website using sitemap.xml as the primary URL source.
+    使用 sitemap.xml 作为主要 URL 来源爬取网站。
+
+    Falls back to regular BFS crawling if no sitemap is found.
+    如果未找到 sitemap 则回退到常规 BFS 爬取。
+
+    Args:
+        start_url: Starting URL for crawling
+        ua: User agent string
+        max_pages: Maximum number of pages to crawl
+        delay: Delay between requests
+        **kwargs: Additional arguments to pass to crawl_site() if fallback is needed
+
+    Returns:
+        List of (url, html, depth) tuples, same format as crawl_site()
+    """
+    logging.info("Attempting sitemap-first crawling / 尝试sitemap优先爬取")
+
+    # Step 1: Discover sitemaps
+    sitemaps = discover_sitemaps(start_url, ua)
+
+    if not sitemaps:
+        logging.info("No sitemaps found, falling back to BFS crawling / 未找到sitemap，回退到BFS爬取")
+        return crawl_site(start_url, ua, max_pages=max_pages, delay=delay, **kwargs)
+
+    # Step 2: Parse all discovered sitemaps
+    all_urls = []
+    for sitemap_url in sitemaps:
+        logging.info(f"Parsing sitemap: {sitemap_url}")
+        urls_from_sitemap = parse_sitemap(sitemap_url, ua)
+        all_urls.extend(urls_from_sitemap)
+
+    if not all_urls:
+        logging.warning("Sitemaps found but no URLs extracted, falling back to BFS / Sitemap已找到但无URL提取，回退到BFS")
+        return crawl_site(start_url, ua, max_pages=max_pages, delay=delay, **kwargs)
+
+    logging.info(f"Extracted {len(all_urls)} URLs from sitemaps / 从sitemap提取了 {len(all_urls)} 个URL")
+
+    # Step 3: Sort URLs by priority (high to low) and lastmod (recent first)
+    def sort_key(url_dict):
+        priority = url_dict.get('priority', 0.5)
+        # Convert lastmod to timestamp for sorting (None = 0)
+        lastmod = url_dict.get('lastmod')
+        lastmod_ts = 0
+        if lastmod:
+            try:
+                # Parse ISO format date/datetime
+                from datetime import datetime
+                dt = datetime.fromisoformat(lastmod.replace('Z', '+00:00'))
+                lastmod_ts = dt.timestamp()
+            except:
+                lastmod_ts = 0
+
+        return (-priority, -lastmod_ts)  # Negative for descending order
+
+    all_urls.sort(key=sort_key)
+
+    # Step 4: Limit to max_pages
+    urls_to_fetch = all_urls[:max_pages]
+    logging.info(f"Will fetch {len(urls_to_fetch)} URLs (limited by max_pages={max_pages}) / 将获取 {len(urls_to_fetch)} 个URL")
+
+    # Step 5: Fetch each URL from sitemap
+    results = []
+    for i, url_dict in enumerate(urls_to_fetch):
+        url = url_dict['url']
+
+        try:
+            logging.info(f"[{i+1}/{len(urls_to_fetch)}] Fetching: {url}")
+
+            # Fetch the page
+            html = fetch_html(url, ua)
+
+            if html:
+                # Add to results (depth=0 for sitemap-sourced URLs)
+                results.append((url, html, 0))
+            else:
+                logging.warning(f"Failed to fetch: {url}")
+
+            # Respect crawl delay
+            if delay > 0 and i < len(urls_to_fetch) - 1:
+                time.sleep(delay)
+
+        except Exception as e:
+            logging.error(f"Error fetching {url}: {e}")
+            continue
+
+    logging.info(f"Sitemap crawl completed: {len(results)}/{len(urls_to_fetch)} pages fetched successfully")
+
+    return results
+
+# ============================================================================
+# End of Sitemap Functions
+# ============================================================================
+
+def detect_government_site(url: str, html: str) -> bool:
+    """
+    Detect if a website is a government site based on domain patterns and HTML content.
+    
+    Args:
+        url: The website URL to check
+        html: HTML content of the homepage for additional verification
+        
+    Returns:
+        bool: True if detected as government site, False otherwise
+    """
+    import urllib.parse
+    
+    # Parse the URL
+    parsed_url = urllib.parse.urlparse(url)
+    domain = parsed_url.netloc.lower()
+    
+    # Stage 2.1: Government domain pattern detection
+    gov_domain_patterns = [
+        r'\.gov\.cn$',    # Chinese government sites
+        r'\.gov$',        # US government sites  
+        r'\.org\.cn$',    # Chinese organizations (many government-related)
+        r'\.mil\.cn$',    # Chinese military sites
+        r'\.edu\.cn$',    # Chinese educational sites (government-funded)
+        r'\.ac\.cn$',     # Chinese academic sites
+        r'\.gov\.uk$',    # UK government sites
+        r'\.europa\.eu$', # EU government sites
+    ]
+    
+    # Check domain patterns
+    for pattern in gov_domain_patterns:
+        if re.search(pattern, domain):
+            logging.info(f"Government site detected by domain pattern: {domain}")
+            return True
+    
+    # Stage 2.1: HTML content-based detection
+    if html:
+        gov_content_indicators = [
+            r'政府|Government|官方|Official',  # Government keywords
+            r'政务|公告|通知|Public Notice',   # Government activity keywords
+            r'党委|市委|区委|县委',              # Party committee keywords (Chinese)
+            r'人民政府|People.*Government',    # People's government
+            r'国务院|State Council',          # State council
+            r'中华人民共和国|People.*Republic.*China', # PRC
+            r'Gov\.cn|政府门户|Government Portal', # Government portal indicators
+        ]
+        
+        # Check for government content indicators
+        for pattern in gov_content_indicators:
+            if re.search(pattern, html, re.I):
+                logging.info(f"Government site detected by content pattern: {pattern}")
+                return True
+    
+    return False
+
+def extract_site_categories(url: str, html: str) -> list:
+    """
+    Extract website navigation structure and categories.
+    
+    Args:
+        url: Base URL of the website
+        html: HTML content of the homepage
+        
+    Returns:
+        List[dict]: List of category dictionaries with 'name', 'url', 'priority' keys
+    """
+    import urllib.parse
+    from bs4 import BeautifulSoup
+    
+    if not html:
+        return []
+    
+    categories = []
+    base_parts = urllib.parse.urlparse(url)
+    
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Stage 2.2: Navigation menu detection patterns
+        nav_selectors = [
+            'nav ul li a',           # Standard navigation
+            '.navbar ul li a',       # Bootstrap navbar
+            '.nav ul li a',          # Navigation class
+            '.menu ul li a',         # Menu class
+            '.main-nav ul li a',     # Main navigation
+            '.navigation ul li a',   # Navigation class variation
+            'ul.nav li a',           # Direct nav class on ul
+            'ul.menu li a',          # Direct menu class on ul
+            '.header nav a',         # Header navigation
+            '.top-nav a',            # Top navigation
+        ]
+        
+        # Collect all potential navigation links
+        nav_links = set()
+        
+        for selector in nav_selectors:
+            try:
+                links = soup.select(selector)
+                for link in links:
+                    href = link.get('href')
+                    text = link.get_text(strip=True)
+                    
+                    if href and text and len(text) > 1:
+                        # Convert to absolute URL
+                        full_url = urllib.parse.urljoin(url, href)
+                        url_parts = urllib.parse.urlparse(full_url)
+                        
+                        # Only include same-domain links
+                        if url_parts.netloc == base_parts.netloc:
+                            nav_links.add((text, full_url))
+                            
+            except Exception as e:
+                logging.debug(f"Failed to parse selector {selector}: {e}")
+                continue
+        
+        # Stage 2.2: Government-specific category prioritization
+        gov_priority_keywords = [
+            ('政务公开', '政务', '公开', 'Public Affairs'),  # Public affairs - High priority
+            ('通知公告', '公告', '通知', 'Notice'),          # Notices - High priority  
+            ('新闻', '资讯', '动态', 'News'),               # News - Medium priority
+            ('服务', '办事', '业务', 'Service'),            # Services - High priority
+            ('政策', '法规', '规章', 'Policy'),             # Policies - High priority
+            ('领导', '组织', '机构', 'Leadership'),         # Leadership - Medium priority
+        ]
+        
+        # Convert nav_links to categories with priority scoring
+        for text, link_url in nav_links:
+            priority = 1  # Default priority
+            
+            # Check for government priority keywords
+            for keywords in gov_priority_keywords:
+                for keyword in keywords:
+                    if keyword.lower() in text.lower():
+                        if '公开' in keywords or '公告' in keywords or 'Service' in keywords or 'Policy' in keywords:
+                            priority = 3  # High priority
+                        elif '新闻' in keywords or 'News' in keywords or 'Leadership' in keywords:
+                            priority = 2  # Medium priority
+                        break
+                if priority > 1:
+                    break
+            
+            categories.append({
+                'name': text,
+                'url': link_url,
+                'priority': priority
+            })
+        
+        # Sort by priority (high to low) then by name
+        categories.sort(key=lambda x: (-x['priority'], x['name']))
+        
+        logging.info(f"Extracted {len(categories)} site categories")
+        if categories:
+            high_priority = [c for c in categories if c['priority'] == 3]
+            logging.info(f"High priority categories: {len(high_priority)}")
+            
+    except Exception as e:
+        logging.warning(f"Failed to extract site categories: {e}")
+        
+    return categories
+
+def crawl_site_by_categories(start_url: str, ua: str, categories: list, **kwargs):
+    """
+    Crawl site with category-first strategy for government sites.
+    
+    Args:
+        start_url: Starting URL
+        ua: User agent string
+        categories: List of category dicts from extract_site_categories()
+        **kwargs: Additional arguments passed to crawl_site()
+        
+    Yields:
+        Iterator of (category_info, pages) tuples for progressive results
+    """
+    # Extract parameters for individual category crawls
+    max_depth = kwargs.get('max_depth', 3)
+    max_pages_per_category = min(kwargs.get('max_pages', 1000) // max(len(categories), 1), 100)
+    delay = kwargs.get('delay', 0.5)
+    enable_optimizations = kwargs.get('enable_optimizations', True)
+    
+    logging.info(f"Starting category-first crawl with {len(categories)} categories")
+    logging.info(f"Max {max_pages_per_category} pages per category")
+    
+    all_pages = []
+    total_crawled = 0
+    
+    # Sort categories by priority for crawling order
+    sorted_categories = sorted(categories, key=lambda x: (-x['priority'], x['name']))
+    
+    for i, category in enumerate(sorted_categories):
+        if total_crawled >= kwargs.get('max_pages', 1000):
+            break
+            
+        category_name = category['name']
+        category_url = category['url']
+        category_priority = category['priority']
+        
+        logging.info(f"[{i+1}/{len(sorted_categories)}] Crawling category '{category_name}' (priority {category_priority})")
+        
+        try:
+            # Crawl this category with limited scope
+            category_pages = crawl_site(
+                category_url,
+                ua,
+                max_depth=min(max_depth, 2),  # Limit depth per category
+                max_pages=max_pages_per_category,
+                delay=delay,
+                enable_optimizations=enable_optimizations,
+                crawl_strategy='default'  # Use default strategy for individual categories
+            )
+            
+            logging.info(f"Category '{category_name}' yielded {len(category_pages)} pages")
+            
+            # Yield progressive results
+            category_info = {
+                'name': category_name,
+                'url': category_url,
+                'priority': category_priority,
+                'pages_count': len(category_pages)
+            }
+            
+            yield (category_info, category_pages)
+            
+            all_pages.extend(category_pages)
+            total_crawled += len(category_pages)
+            
+        except Exception as e:
+            logging.warning(f"Failed to crawl category '{category_name}': {e}")
+            continue
+    
+    logging.info(f"Category-first crawl completed: {total_crawled} total pages from {len(sorted_categories)} categories")
+
+def crawl_site(start_url: str, ua: str, max_depth: int = 10,
+               max_pages: int = 1000, delay: float = 0.5,
+             
+               follow_pagination: bool = False,
+               same_domain_only: bool = True,
+               # Stage 1 optimization parameters
+               enable_optimizations: bool = True,
+               crawl_strategy: str = 'default',
+               # Stage 1.3 memory optimization
+               memory_efficient: bool = False,
+               page_callback = None) -> list:
+    """
+    Crawl entire site using BFS algorithm.
+    使用 BFS 算法爬取整个站点。
+
+    Returns list of (url, html, depth) tuples.
+    返回 (url, html, depth) 元组列表。
+
+    Args:
+        start_url: Starting URL for crawling / 爬取起始 URL
+        ua: User agent string for requests / 请求的 User Agent 字符串
+        max_depth: Maximum crawling depth / 最大爬取深度
+        max_pages: Maximum number of pages to crawl / 最大爬取页面数
+        delay: Delay between requests in seconds / 请求间隔秒数
+        follow_pagination: Follow pagination links / 跟随分页链接
+        same_domain_only: Only crawl same domain / 仅爬取同域名
+        enable_optimizations: Enable Stage 1 optimizations / 启用Stage 1优化
+        crawl_strategy: Crawling strategy / 爬取策略
+        memory_efficient: Enable memory optimization / 启用内存优化
+        page_callback: Optional callback for streaming / 流式处理的可选回调
+    """
+    # Initialize crawl statistics
+    stats = {
+        'pages_crawled': 0,
+        'pages_success': 0, 
+        'pages_failed': 0,
+        'total_size': 0,
+        'start_time': time.time(),
+        'failed_urls': []  # Track failed URLs for detailed reporting
+    }
+    
+    visited_normalized = set()  # For deduplication using normalized URLs
+    url_mapping = {}  # Maps normalized URLs to original URLs for fetching
+    queue = deque([(start_url, 0)])  # (original_url, depth) - keep original URL
+    
+    # Stage 1.3: Memory-efficient page storage
+    if memory_efficient:
+        pages = []  # Store only basic info for memory-efficient mode
+        page_batch = []  # Temporary batch for processing
+        batch_size = 50  # Process in batches of 50 pages
+    else:
+        pages = []  # Traditional full storage
+    
+    logging.info(f"Starting site crawl from {start_url}")
+    logging.info(f"Settings: max_depth={max_depth}, max_pages={max_pages}, delay={delay}s, strategy={crawl_strategy}")
+    
+    # Stage 2.3: Check for government site and category-first strategy
+    if crawl_strategy == 'category_first':
+        # First, fetch the homepage to detect government site and extract categories
+        try:
+            homepage_html, _ = fetch_html(start_url, ua=ua, timeout=30)  # Fix: properly unpack tuple return value
+            
+            # Detect if it's a government site
+            is_government = detect_government_site(start_url, homepage_html)
+            
+            if is_government:
+                # Extract site categories
+                categories = extract_site_categories(start_url, homepage_html)
+                
+                if categories:
+                    logging.info(f"Government site detected with {len(categories)} categories. Using category-first strategy.")
+                    
+                    # Use category-first crawling
+                    all_category_pages = []
+                    crawl_params = {
+                        'max_depth': max_depth,
+                        'max_pages': max_pages,
+                        'delay': delay,
+                        'enable_optimizations': enable_optimizations
+                    }
+                    
+                    for category_info, category_pages in crawl_site_by_categories(start_url, ua, categories, **crawl_params):
+                        all_category_pages.extend(category_pages)
+                        
+                        # Check if we've reached the page limit
+                        if len(all_category_pages) >= max_pages:
+                            break
+                    
+                    # Update final statistics (simplified for category-first mode)
+                    logging.info(f"Category-first crawl summary: {len(all_category_pages)} pages total")
+                    return all_category_pages[:max_pages]  # Ensure we don't exceed limit
+                else:
+                    logging.info("Government site detected but no categories found. Falling back to default strategy.")
+            else:
+                logging.info("Non-government site detected. Falling back to default strategy.")
+                
+        except Exception as e:
+            logging.warning(f"Category-first strategy failed: {e}. Falling back to default strategy.")
+    
+    # Default BFS crawling strategy (original logic)
+    while queue and len(visited_normalized) < max_pages:
+        current_url, depth = queue.popleft()
+        current_normalized = normalize_url_for_dedup(current_url)
+        
+        # Skip if already visited or too deep
+        if current_normalized in visited_normalized or depth > max_depth:
+            continue
+        
+        # Rate limiting
+        if visited_normalized and delay > 0:
+            time.sleep(delay)
+        
+        stats['pages_crawled'] += 1
+        
+        try:
+            # Progress reporting: verbose logging vs progress line
+            if logging.getLogger().level <= logging.INFO:
+                # Verbose mode: full logging
+                logging.info(f"[{len(visited_normalized)+1}/{max_pages}] Crawling depth {depth}: {current_url}")
+            else:
+                # Normal mode: updating progress line on stderr
+                elapsed = time.time() - stats['start_time']
+                rate = stats['pages_success'] / (elapsed / 60) if elapsed > 0 else 0  # pages per minute
+                
+                # Progress line that overwrites itself
+                sys.stderr.write(f"\rCrawling: {len(visited_normalized)+1}/{max_pages} pages ({rate:.1f} pages/min)")
+                sys.stderr.flush()
+            
+            # Fetch page using original URL (preserves case)
+            html, _ = fetch_html(current_url, ua=ua, timeout=30)  # Fix: properly unpack tuple return value
+            visited_normalized.add(current_normalized)
+            url_mapping[current_normalized] = current_url
+            
+            # Stage 1.3: Memory-efficient page handling
+            if memory_efficient:
+                # Add to batch for processing
+                page_batch.append((current_url, html, depth))
+                
+                # Process batch when full
+                if len(page_batch) >= batch_size:
+                    if page_callback:
+                        page_callback(page_batch.copy())  # Send copy to callback
+                    # Keep only metadata for final result (no HTML content)
+                    for url, _, d in page_batch:
+                        pages.append((url, '', d))
+                    page_batch.clear()
+            else:
+                # Traditional full storage
+                pages.append((current_url, html, depth))
+            
+            # Update statistics
+            stats['pages_success'] += 1
+            stats['total_size'] += len(html.encode('utf-8'))
+            
+            # Extract and queue new links (only if not at max depth)
+            if depth < max_depth:
+                # Stage 1.1 optimization: Enable documentation filter during link extraction
+                enable_doc_filter = enable_optimizations and crawl_strategy == 'default'
+                link_mapping = extract_internal_links(html, current_url, enable_doc_filter=enable_doc_filter)
+                
+                # Stage 1.2 optimization: Batch process new links
+                if enable_optimizations:
+                    # Batch filtering and deduplication
+                    new_normalized_links = set(link_mapping.keys()) - visited_normalized
+                    
+                    if enable_doc_filter:
+                        # All links already pre-filtered for documentation
+                        doc_links = [(norm, orig) for norm, orig in link_mapping.items() 
+                                   if norm in new_normalized_links]
+                        logging.info(f"Found {len(doc_links)} new documentation links (pre-filtered)")
+                    else:
+                        # Batch apply documentation filter
+                        doc_links = [(norm, orig) for norm, orig in link_mapping.items() 
+                                   if norm in new_normalized_links and is_documentation_url(orig)]
+                        logging.info(f"Found {len(doc_links)} new documentation links")
+                    
+                    # Batch queue operations - sort and limit in one operation
+                    links_to_queue = sorted(doc_links)[:50]  # Limit per-page discoveries
+                    for normalized_link, original_link in links_to_queue:
+                        queue.append((original_link, depth + 1))
+                        
+                else:
+                    # Original non-optimized path for compatibility
+                    new_normalized_links = set(link_mapping.keys()) - visited_normalized
+                    doc_links = [(norm, orig) for norm, orig in link_mapping.items() 
+                               if norm in new_normalized_links and is_documentation_url(orig)]
+                    logging.info(f"Found {len(doc_links)} new documentation links")
+                    
+                    for normalized_link, original_link in sorted(doc_links)[:50]:
+                        queue.append((original_link, depth + 1))
+            
+        except Exception as e:
+            logging.warning(f"Failed to crawl {current_url}: {e}")
+            stats['pages_failed'] += 1
+            stats['failed_urls'].append((current_url, str(e)))
+            continue
+    
+    # Stage 1.3: Process any remaining batch
+    if memory_efficient and 'page_batch' in locals() and page_batch:
+        if page_callback:
+            page_callback(page_batch)
+        # Add remaining pages as metadata only
+        pages.extend([(url, '', d) for url, _, d in page_batch])
+        page_batch.clear()
+    
+    # Clear progress line if we were showing it
+    if logging.getLogger().level > logging.INFO:
+        sys.stderr.write('\r' + ' ' * 80 + '\r')  # Clear the line
+        sys.stderr.flush()
+    
+    # Enhanced crawl summary and visibility reporting
+    duration = time.time() - stats['start_time']
+    size_mb = stats['total_size'] / (1024 * 1024)
+    success_rate = (stats['pages_success'] / stats['pages_crawled'] * 100) if stats['pages_crawled'] > 0 else 0
+    
+    # 1. Crawl quality summary (5-8 lines)
+    logging.info(f"Crawl Quality Summary: {success_rate:.1f}% success rate ({stats['pages_success']}/{stats['pages_crawled']} pages)")
+    logging.info(f"Data Retrieved: {size_mb:.1f}MB in {duration:.1f}s ({size_mb/duration:.2f} MB/s)")
+    
+    # 2. Failed URL details in verbose mode (3-5 lines)
+    if stats['failed_urls'] and logging.getLogger().level <= logging.INFO:
+        logging.info(f"Failed URLs ({len(stats['failed_urls'])}):") 
+        for failed_url, error in stats['failed_urls'][:5]:  # Show first 5 failures
+            logging.info(f"  - {failed_url}: {error}")
+        if len(stats['failed_urls']) > 5:
+            logging.info(f"  ... and {len(stats['failed_urls']) - 5} more failures")
+    
+    # 3. Completeness indicator (2-3 lines)
+    hit_max_pages = len(visited_normalized) >= max_pages
+    hit_max_depth = any(depth >= max_depth for _, _, depth in pages)
+    if hit_max_pages or hit_max_depth:
+        limits_hit = []
+        if hit_max_pages: limits_hit.append(f"max-pages({max_pages})")
+        if hit_max_depth: limits_hit.append(f"max-depth({max_depth})")
+        logging.info(f"Crawl Status: INCOMPLETE - stopped due to {' and '.join(limits_hit)} limit")
+    else:
+        logging.info("Crawl Status: COMPLETE - all discoverable pages crawled")
+    
+    return pages
+
+def aggregate_crawled_site(pages: list, parser_func) -> tuple[str, str, dict]:
+    """
+    Aggregate crawled site pages into single comprehensive document.
+    Organizes content by depth and URL structure.
+    """
+    if not pages:
+        return '', '', {}
+    
+    # Group pages by depth for hierarchical organization
+    by_depth = {}
+    for url, html, depth in pages:
+        if depth not in by_depth:
+            by_depth[depth] = []
+        by_depth[depth].append((url, html))
+    
+    # Parse all pages
+    all_content = []
+    all_images = []
+    toc_entries = []
+    
+    for depth in sorted(by_depth.keys()):
+        if depth > 0:
+            all_content.append(f"\n{'#' * (depth + 1)} Level {depth} Pages\n")
+        
+        for url, html in by_depth[depth]:
+            try:
+                # Pass is_crawling=True only to generic_to_markdown which supports it
+                if parser_func == generic_to_markdown:
+                    date, content, metadata = parser_func(html, url, 'safe', is_crawling=True)
+                else:
+                    date, content, metadata = parser_func(html, url)
+                
+                # Extract title from content
+                title_match = re.search(r'^#\s+(.+)$', content, re.M)
+                title = title_match.group(1) if title_match else urllib.parse.urlparse(url).path
+                
+                # Add to TOC
+                indent = '  ' * depth
+                toc_entries.append(f"{indent}- [{title}](#{depth}-{len(toc_entries)})")
+                
+                # Add content with section anchor
+                all_content.append(f"\n<a id='{depth}-{len(toc_entries)-1}'></a>\n")
+                all_content.append(content)
+                all_content.append("\n---\n")
+                
+                # Collect images
+                all_images.extend(metadata.get('images', []))
+                
+            except Exception as e:
+                logging.warning(f"Failed to parse {url}: {e}")
+    
+    # Build final document with TOC
+    toc = "## Table of Contents\n\n" + '\n'.join(toc_entries)
+    final_content = toc + "\n\n" + '\n'.join(all_content)
+    
+    # Create metadata
+    metadata = {
+        'total_pages': len(pages),
+        'max_depth': max(by_depth.keys()) if by_depth else 0,
+        'images': list(set(all_images)),
+        'crawl_complete': True
+    }
+    
+    return datetime.datetime.now().strftime("%Y-%m-%d"), final_content, metadata
+
+
+def rewrite_and_download_assets(md: str, md_base: str, outdir: Path, ua: str, assets_root: str) -> str:
+    # Find all http(s) images
+    urls = []
+    for m in re.finditer(r'!\[[^\]]*\]\((https?://[^)]+)\)', md, re.I):
+        url = m.group(1)
+        if url not in urls:
+            urls.append(url)
+    # Also capture regular links that are image-like
+    for m in re.finditer(r'\[[^\]]*\]\((https?://[^)]+)\)', md, re.I):
+        url = m.group(1)
+        if url in urls:
+            continue
+        if re.search(r'\.(?:jpg|jpeg|png|webp|gif)(?:\?|$)', url, re.I) or ('imageMogr2' in url) or ('imageView2' in url):
+            urls.append(url)
+    if not urls:
+        return md
+    # Prepare asset directory
+    assets_dir = outdir / assets_root / sanitize_filename(md_base)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    def filename_for(i: int, url: str) -> str:
+        # derive extension from URL path; fallback to .jpg
+        path = urllib.parse.urlparse(url).path
+        ext = ''
+        m = re.search(r'\.([a-zA-Z0-9]{3,4})$', path)
+        if m:
+            ext = '.' + m.group(1).lower()
+        elif 'imageMogr2' in url or 'imageView2' in url:
+            ext = '.jpg'
+        else:
+            ext = '.jpg'
+        return f"{i:02d}{ext}"
+
+    # Download and build mapping
+    mapping = {}
+    for idx, u in enumerate(urls, start=1):
+        fname = filename_for(idx, u)
+        dest = assets_dir / fname
+        if not dest.exists():
+            # download with UA
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": ua, "Accept-Language": "zh-CN,zh;q=0.9"})
+                with urllib.request.urlopen(req, timeout=60, context=ssl_context_unverified) as r:
+                    data = r.read()
+                dest.write_bytes(data)
+            except Exception:
+                # skip failures; leave URL as is
+                continue
+        rel_path = os.path.relpath(dest, outdir)
+        mapping[u] = rel_path
+
+    # Replace in Markdown
+    def repl_img(m):
+        u = m.group(1)
+        return m.group(0).replace(u, mapping.get(u, u))
+    def repl_link(m):
+        u = m.group(2)
+        if u in mapping:
+            return f"[{m.group(1)}]({mapping[u]})"
+        return m.group(0)
+    md2 = re.sub(r'!\[[^\]]*\]\((https?://[^)]+)\)', repl_img, md)
+    md2 = re.sub(r'\[([^\]]*)\]\((https?://[^)]+)\)', repl_link, md2)
+    return md2
+
+
+def determine_output_format(args, url, content_type=None):
+    """
+    Determine the appropriate output format based on CLI args and context.
+    
+    Args:
+        args: Parsed command line arguments containing format preference
+        url: Target URL being processed  
+        content_type: Optional content type hint
+        
+    Returns:
+        tuple: (should_output_markdown: bool, should_output_html: bool)
+        
+    Examples:
+        args.format='markdown' -> (True, False)
+        args.format='html' -> (False, True) 
+        args.format='both' -> (True, True)
+    """
+    # Validate input format preference
+    format_choice = getattr(args, 'format', 'markdown')
+    
+    # Log format decision for debugging
+    logging.debug(f"Output format requested: {format_choice} for URL: {url}")
+    
+    # Determine output requirements based on format choice
+    if format_choice == 'html':
+        return (False, True)
+    elif format_choice == 'both':
+        return (True, True) 
+    else:  # 'markdown' or any other value defaults to markdown
+        if format_choice != 'markdown':
+            logging.warning(f"Unknown format '{format_choice}', defaulting to markdown")
+        return (True, False)
+
+
+def write_html_file(content, output_path, url, title=None):
+    """
+    Write HTML content to file with proper formatting and metadata.
+    
+    Args:
+        content (str): Raw HTML content to write
+        output_path (str): Full path where HTML file should be saved
+        url (str): Source URL for metadata/comments  
+        title (str, optional): Page title for HTML head
+        
+    Returns:
+        str: Absolute path of written file
+        
+    Raises:
+        IOError: If file writing fails
+        ValueError: If content or path is invalid
+    """
+    import os
+    from datetime import datetime
+    
+    # Validate inputs
+    if not content:
+        raise ValueError("Content cannot be empty")
+    if not output_path:
+        raise ValueError("Output path cannot be empty")
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Generate HTML document if content is just a fragment
+    if not content.strip().startswith('<!DOCTYPE') and not content.strip().startswith('<html'):
+        # Create full HTML document
+        page_title = title or "Web Content"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        full_html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{page_title}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 2rem; }}
+        .metadata {{ color: #666; font-size: 0.9em; border-bottom: 1px solid #eee; padding-bottom: 1rem; margin-bottom: 2rem; }}
+        .content {{ max-width: 800px; }}
+    </style>
+</head>
+<body>
+    <div class="metadata">
+        <p><strong>Source:</strong> <a href="{url}">{url}</a></p>
+        <p><strong>Generated:</strong> {timestamp}</p>
+        <p><strong>Tool:</strong> WebFetcher</p>
+    </div>
+    <div class="content">
+        {content}
+    </div>
+</body>
+</html>"""
+        content = full_html
+    
+    # Write file with UTF-8 encoding
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        logging.debug(f"HTML file written: {output_path}")
+        return os.path.abspath(output_path)
+        
+    except IOError as e:
+        logging.error(f"Failed to write HTML file {output_path}: {e}")
+        raise
+
+
+def get_html_output_path(args, url, base_filename=None):
+    """
+    Generate appropriate HTML output file path based on configuration.
+    
+    Args:
+        args: Parsed command line arguments
+        url (str): Source URL for filename generation
+        base_filename (str, optional): Base name override
+        
+    Returns:
+        str: Absolute path for HTML output file
+        
+    Examples:
+        URL: https://example.com/article -> example.com_article.html
+        With base_filename: custom -> custom.html
+    """
+    import os
+    from urllib.parse import urlparse
+    
+    # Determine output directory
+    if hasattr(args, 'outdir') and args.outdir:
+        output_dir = args.outdir
+    else:
+        output_dir = "output"
+    
+    # Generate filename
+    if base_filename:
+        # Use provided base filename
+        filename = f"{base_filename}.html"
+    else:
+        # Generate from URL using existing patterns
+        try:
+            parsed = urlparse(url)
+            # Create safe filename from URL
+            domain = parsed.netloc.replace('www.', '').replace(':', '_')
+            path_part = parsed.path.strip('/').replace('/', '_').replace('.', '_')
+            
+            if path_part:
+                filename = f"{domain}_{path_part}.html"
+            else:
+                filename = f"{domain}.html"
+                
+            # Clean up filename (remove unsafe characters)
+            filename = "".join(c for c in filename if c.isalnum() or c in '._-')
+            
+        except Exception:
+            # Fallback to simple timestamp-based name
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"webpage_{timestamp}.html"
+    
+    # Create full path
+    full_path = os.path.join(output_dir, filename)
+    
+    # Handle duplicate files by adding counter
+    counter = 1
+    original_path = full_path
+    while os.path.exists(full_path):
+        name, ext = os.path.splitext(original_path)
+        full_path = f"{name}_{counter}{ext}"
+        counter += 1
+    
+    return os.path.abspath(full_path)
+
+
+def format_selenium_error(exception):
+    """
+    格式化Selenium相关错误为用户友好的输出
+
+    Args:
+        exception: Selenium相关的异常对象
+
+    Returns:
+        str: 格式化的错误消息字符串
+    """
+    # Detect system language from LANG environment variable
+    lang = os.environ.get('LANG', '').lower()
+    is_chinese = 'zh' in lang or 'cn' in lang
+
+    # Define bilingual labels
+    if is_chinese:
+        labels = {
+            'error': '错误',
+            'problem': '问题',
+            'solution': '解决方案',
+            'command': '命令'
+        }
+    else:
+        labels = {
+            'error': 'ERROR',
+            'problem': 'PROBLEM',
+            'solution': 'SOLUTION',
+            'command': 'COMMAND'
+        }
+
+    exception_type = type(exception).__name__
+    error_message = str(exception)
+
+    # Split error message into sections
+    problem = ""
+    solution = ""
+    command = ""
+
+    # Parse the error message to extract PROBLEM, SOLUTION, and COMMAND
+    lines = error_message.split('\n')
+    current_section = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Identify sections
+        if 'SOLUTION:' in line:
+            current_section = 'solution'
+            # Extract text after SOLUTION: on same line
+            solution_text = line.split('SOLUTION:', 1)[-1].strip()
+            if solution_text:
+                solution += solution_text + '\n'
+            continue
+
+        # Extract commands (prioritize shell scripts, then chrome commands, then pip install)
+        if './config/chrome-debug.sh' in line:
+            # Extract shell script command (highest priority)
+            if ':' in line:
+                cmd_part = line.split(':', 1)[-1].strip()
+            else:
+                cmd_part = line.strip()
+            if cmd_part:
+                command = cmd_part  # Override any previous command
+        elif ('--remote-debugging-port' in line or 'pip install' in line) and not command:
+            # Extract chrome or pip command (lower priority)
+            if ':' in line:
+                cmd_part = line.split(':', 1)[-1].strip()
+            else:
+                cmd_part = line.strip()
+            if cmd_part:
+                command = cmd_part
+
+        # Accumulate text based on current section
+        if current_section == 'solution':
+            if stripped and not stripped.startswith('SOLUTION:'):
+                solution += stripped + '\n'
+        elif not current_section:
+            # Before SOLUTION section, this is the problem
+            if stripped and 'SOLUTION:' not in line:
+                problem += stripped + '\n'
+
+    # Clean up sections
+    problem = problem.strip()
+    solution = solution.strip()
+    command = command.strip()
+
+    # If we couldn't parse sections, fall back to simple format
+    if not problem:
+        problem = error_message.split('SOLUTION:')[0].strip()
+
+    if not solution and 'SOLUTION:' in error_message:
+        solution = error_message.split('SOLUTION:', 1)[-1].strip()
+
+    # Build formatted output
+    output = []
+    output.append("=" * 40)
+    output.append(f"{labels['error']}: {exception_type}")
+    output.append("=" * 40)
+    output.append("")
+    output.append(f"{labels['problem']}:")
+    output.append(problem)
+    output.append("")
+
+    if solution:
+        output.append(f"{labels['solution']}:")
+        output.append(solution)
+        output.append("")
+
+    if command:
+        output.append(f"{labels['command']}:")
+        output.append(command)
+
+    output.append("=" * 40)
+
+    return '\n'.join(output)
+
+
+def generate_failure_markdown(url: str, metrics: FetchMetrics, exception=None) -> str:
+    """
+    生成失败报告的Markdown内容
+
+    Args:
+        url: 目标URL
+        metrics: FetchMetrics对象，包含失败详情
+        exception: 可选的异常对象
+
+    Returns:
+        str: 格式化的失败Markdown内容
+    """
+    # If error_handler is available, use it for enhanced reporting
+    if ERROR_HANDLER_AVAILABLE:
+        try:
+            # Step 1: Initialize error_handler components
+            classifier = ErrorClassifier()
+            reporter = ErrorReporter(classifier)
+
+            # Step 2: Convert FetchMetrics to error_handler expected format
+            metrics_dict = {
+                'primary_method': getattr(metrics, 'primary_method', 'unknown'),
+                'final_status': getattr(metrics, 'final_status', 'failed'),
+                'error_message': getattr(metrics, 'error_message', 'Unknown error'),
+                'total_duration': getattr(metrics, 'total_duration', 0.0),
+                'status_code': getattr(metrics, 'status_code', None),
+                'fetch_duration': getattr(metrics, 'fetch_duration', 0.0),
+                'fallback_method': getattr(metrics, 'fallback_method', None),
+                'total_attempts': getattr(metrics, 'total_attempts', 1),
+            }
+
+            # Step 3: Use ErrorReporter to generate report
+            markdown_report = reporter.generate_markdown_report(
+                url=url,
+                metrics=metrics_dict,
+                exception=exception
+            )
+
+            # Step 4: Return report (backward compatible)
+            return markdown_report
+
+        except Exception as e:
+            # Fallback to original implementation if error_handler fails
+            logging.warning(f"Error handler failed, using fallback: {e}")
+
+    # Original implementation (fallback when error_handler is not available or fails)
+    # Detect system language from LANG environment variable
+    lang = os.environ.get('LANG', '').lower()
+    is_chinese = 'zh' in lang or 'cn' in lang
+
+    # Get current timestamp
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Extract error information
+    error_type = type(exception).__name__ if exception else metrics.primary_method or "Unknown"
+    error_description = metrics.error_message or str(exception) if exception else "No error details available"
+
+    # Build markdown content
+    output = []
+
+    # Title with warning emoji
+    if is_chinese:
+        output.append("# ⚠️ 网页抓取失败\n")
+    else:
+        output.append("# ⚠️ Web Fetch Failed\n")
+
+    # URL information
+    if is_chinese:
+        output.append(f"**目标URL**: {url}\n")
+    else:
+        output.append(f"**Target URL**: {url}\n")
+
+    # Error summary (blockquote format)
+    if is_chinese:
+        output.append(f"> **错误类型**: {error_type}")
+        output.append(f"> **失败时间**: {current_time}")
+        output.append(f"> **错误描述**: {error_description}\n")
+    else:
+        output.append(f"> **Error Type**: {error_type}")
+        output.append(f"> **Failed At**: {current_time}")
+        output.append(f"> **Description**: {error_description}\n")
+
+    # Troubleshooting steps
+    if is_chinese:
+        output.append("## 故障排除步骤\n")
+
+        # Check if Selenium-related error
+        if 'selenium' in metrics.primary_method.lower() or (exception and 'Chrome' in error_type):
+            output.append("1. **检查Chrome浏览器是否正在运行**")
+            output.append("   - 确保Chrome以调试模式启动")
+            output.append("   - 运行命令: `./config/chrome-debug.sh` 或")
+            output.append("   - 手动启动: `/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome_debug_profile`\n")
+            output.append("2. **验证网络连接**")
+            output.append("   - 检查是否能访问目标网站")
+            output.append("   - 尝试在浏览器中手动打开URL\n")
+            output.append("3. **检查端口占用**")
+            output.append("   - 确认9222端口未被其他程序占用")
+            output.append("   - 运行: `lsof -i :9222`\n")
+        else:
+            output.append("1. **检查网络连接**")
+            output.append("   - 验证互联网连接是否正常")
+            output.append("   - 尝试访问其他网站\n")
+            output.append("2. **验证URL有效性**")
+            output.append("   - 确认URL格式正确")
+            output.append("   - 检查目标网站是否可访问\n")
+            output.append("3. **尝试其他抓取方法**")
+            output.append("   - 使用 `--fetch-mode cdp` 尝试CDP方式（轻量级）")
+            output.append("   - 使用 `--fetch-mode selenium` 尝试JavaScript渲染")
+            output.append("   - 或使用 `--fetch-mode urllib` 尝试简单抓取\n")
+
+        output.append("4. **查看详细日志**")
+        output.append("   - 使用 `--verbose` 参数获取更多信息\n")
+    else:
+        output.append("## Troubleshooting Steps\n")
+
+        # Check if Selenium-related error
+        if 'selenium' in metrics.primary_method.lower() or (exception and 'Chrome' in error_type):
+            output.append("1. **Check if Chrome browser is running**")
+            output.append("   - Ensure Chrome is started in debug mode")
+            output.append("   - Run command: `./config/chrome-debug.sh` or")
+            output.append("   - Manual start: `/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome_debug_profile`\n")
+            output.append("2. **Verify network connection**")
+            output.append("   - Check if you can access the target website")
+            output.append("   - Try opening the URL manually in browser\n")
+            output.append("3. **Check port availability**")
+            output.append("   - Ensure port 9222 is not occupied by another program")
+            output.append("   - Run: `lsof -i :9222`\n")
+        else:
+            output.append("1. **Check network connection**")
+            output.append("   - Verify internet connection is working")
+            output.append("   - Try accessing other websites\n")
+            output.append("2. **Verify URL validity**")
+            output.append("   - Ensure URL format is correct")
+            output.append("   - Check if target website is accessible\n")
+            output.append("3. **Try alternative fetch methods**")
+            output.append("   - Use `--fetch-mode cdp` for CDP method (lightweight)")
+            output.append("   - Use `--fetch-mode selenium` for JavaScript rendering")
+            output.append("   - Or use `--fetch-mode urllib` for simple fetch\n")
+
+        output.append("4. **View detailed logs**")
+        output.append("   - Use `--verbose` flag for more information\n")
+
+    # Technical details (collapsible)
+    if is_chinese:
+        output.append("<details>")
+        output.append("<summary>技术细节 / Technical Details</summary>\n")
+    else:
+        output.append("<details>")
+        output.append("<summary>Technical Details</summary>\n")
+
+    output.append(f"- **Fetch Method**: {metrics.primary_method or 'N/A'}")
+    if metrics.fallback_method:
+        output.append(f"- **Fallback Method**: {metrics.fallback_method}")
+    output.append(f"- **Status**: {metrics.final_status}")
+    output.append(f"- **Duration**: {metrics.fetch_duration:.2f}s")
+    output.append(f"- **Total Attempts**: {metrics.total_attempts}")
+    if metrics.error_message:
+        output.append(f"- **Error**: {metrics.error_message}")
+
+    output.append("\n</details>")
+
+    return '\n'.join(output)
+
+
+def get_failure_filename(timestamp: str, url: str) -> str:
+    """
+    生成失败报告的文件名
+
+    Args:
+        timestamp: 时间戳字符串（格式：YYYY-MM-DD-HHMMSS）
+        url: 目标URL
+
+    Returns:
+        str: 失败文件的基础名称（不含扩展名）
+    """
+    from urllib.parse import urlparse
+
+    # Extract domain from URL
+    parsed = urlparse(url)
+    domain = parsed.hostname or 'unknown'
+
+    # Clean domain name using existing sanitize_filename function
+    sanitized_domain = sanitize_filename(domain)
+
+    # Return formatted filename (without extension)
+    return f"FAILED_{timestamp} - {sanitized_domain}"
+
+
+def _save_failure_and_exit(url: str, outdir: Path, method: str, error_msg: str,
+                           exception=None, stdout_mode: bool = False):
+    """Generate failure report, save it, and exit with code 1.
+
+    Consolidates the repeated failure handling pattern in main().
+    """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    failure_filename = get_failure_filename(timestamp, url)
+    failure_metrics = FetchMetrics(
+        primary_method=method,
+        final_status="failed",
+        error_message=error_msg
+    )
+    failure_md = generate_failure_markdown(url, failure_metrics, exception)
+    if stdout_mode:
+        print(failure_md)
+    else:
+        failure_path = outdir / f"{failure_filename}.md"
+        failure_path.write_text(failure_md, encoding='utf-8')
+        logging.info(f"Failure report saved: {failure_path}")
+        print(str(failure_path))
+    # Persist failure for analysis
+    persist_fetch_failure(
+        url=url, input_url=url,
+        fetchers_tried=[method],
+        failure_type='fetch_error',
+        failure_reason=error_msg[:200] if error_msg else 'unknown',
+        last_error=str(exception) if exception else error_msg,
+        html_size=0,
+        validation_details=[],
+        fetch_mode=method,
+        duration_seconds=0,
+    )
+    sys.exit(1)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description='Fetch a URL (WeChat/XHS/generic) and save as Markdown.',
+        prog='webfetcher'
+    )
+    ap.add_argument('url', help='Target URL')
+    ap.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
+    ap.add_argument('-o','--outdir', default='.', help='Output directory (default: current)')
+    ap.add_argument('--render', choices=['auto','always','never'], default='auto', help='Use headless rendering (default: auto)')
+    ap.add_argument('--timeout', type=int, default=60, help='Network timeout in seconds (fetch). Default: 60')
+    ap.add_argument('--render-timeout', type=int, default=90, help='Rendering timeout in seconds (Playwright). Default: 90')
+    ap.add_argument('--html', help='Use local HTML file instead of fetching/rendering')
+    ap.add_argument('--download-assets', action='store_true', help='Download images to assets/<file>/ and rewrite links (default: preserve URLs only)')
+    ap.add_argument('--assets-root', default='assets', help='Assets root directory name (default: assets)')
+    ap.add_argument('--save-html', nargs='?', const=True, help='Save fetched/rendered HTML snapshot before parsing (optional path).')
+    ap.add_argument('--json', action='store_true', help='Output structured JSON alongside Markdown')
+    ap.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging (INFO level, shows startup banner)')
+    ap.add_argument('--debug', action='store_true', help='Enable debug logging + show Python traceback on error')
+    ap.add_argument('--filter', choices=['none', 'safe', 'moderate', 'aggressive'], default='safe',
+                    help='Content filtering level: none (no filtering), safe (remove scripts/ads), moderate (+ navigation), aggressive (+ metadata) (default: safe)')
+    ap.add_argument('--crawl-site', action='store_true',
+                    help='Recursively crawl entire site (BFS traversal of all internal links)')
+    ap.add_argument('--max-crawl-depth', type=int, default=10,
+                    help='Maximum crawl depth for site crawling (default: 10, max: 10)')
+    ap.add_argument('--max-pages', type=int, default=1000,
+                    help='Maximum pages to crawl (default: 1000, max: 1000)')
+    ap.add_argument('--crawl-delay', type=float, default=0.5,
+                    help='Delay between crawl requests in seconds (default: 0.5)')
+
+  
+  
+    ap.add_argument('--follow-pagination', action='store_true',
+                    help='Follow pagination links (next page, etc.) during crawling / 爬取时跟随分页链接（下一页等）')
+    ap.add_argument('--same-domain-only', action='store_true', default=True,
+                    help='Only crawl URLs from the same domain (default: True) / 仅爬取同域名的URL（默认：True）')
+
+  
+  
+    ap.add_argument('--use-sitemap', action='store_true',
+                    help='Use sitemap.xml for site crawling (if available, falls back to BFS if not found) / 使用 sitemap.xml 进行站点爬取（如可用，未找到时回退到BFS）')
+
+    ap.add_argument('--format', choices=['markdown', 'html', 'both'], default='markdown',
+                    help='Output format: markdown (default), html, or both')
+    
+    # Phase 2: Selenium integration arguments
+    # CDP integration: Add 'cdp' mode for Chrome DevTools Protocol
+    ap.add_argument('-m', '--fetch-mode', choices=['auto', 'urllib', 'cdp', 'selenium'], default='auto',
+                    help='Fetch method: auto (urllib->cdp->selenium fallback), urllib (urllib only), cdp (CDP only), selenium (selenium only) (default: auto)')
+    ap.add_argument('-c', '--cdp', action='store_true',
+                    help='Shortcut for --fetch-mode cdp (force CDP for JavaScript rendering with session reuse)')
+    ap.add_argument('-s', '--selenium', action='store_true',
+                    help='Shortcut for --fetch-mode selenium (force Selenium for JavaScript rendering)')
+    ap.add_argument('-u', '--urllib', action='store_true',
+                    help='Shortcut for --fetch-mode urllib (force urllib without Selenium fallback)')
+    ap.add_argument('--selenium-timeout', type=int, default=30,
+                    help='Selenium page load timeout in seconds (default: 30)')
+  
+    ap.add_argument('--force-chrome', action='store_true',
+                    help='Skip Chrome health check (use when Chrome is known to be running)')
+    ap.add_argument('--stdout', action='store_true',
+                    help='Print markdown content to stdout instead of writing to file')
+    ap.add_argument('--engine', choices=['v1', 'v2'], default='v2',
+                    help='Parsing engine: v2 (competition + memory, default), v1 (legacy)')
+    ap.add_argument('--frontmatter', choices=['none', 'yaml'], default='none',
+                    help='Metadata format: none (inline list, default), yaml (YAML front matter)')
+    ap.add_argument('--headless', choices=['auto', 'always', 'never'], default='auto',
+                    help='Headless Chrome for CDP: auto (use existing or launch headless), '
+                         'always (force headless), never (no auto-launch). '
+                         'Only affects --fetch-mode cdp/auto. (default: auto)')
+    ap.add_argument('--lite', action='store_true', default=False,
+                    help='Lightweight CDP fetch: blocks image/CSS/font/media downloads '
+                         'during page rendering for 3-5x speed improvement. '
+                         'Content and image URLs are fully preserved in output. '
+                         'Use for: reading article text, AI analysis, quick extraction. '
+                         'Not for: saving with downloaded images (use default + --download-assets). '
+                         'Only effective with --fetch-mode cdp/auto. (default: off)')
+
+    args = ap.parse_args()
+    
+    # Handle shortcuts for fetch modes
+    if args.cdp:
+        args.fetch_mode = 'cdp'
+    elif args.selenium:
+        args.fetch_mode = 'selenium'
+    elif args.urllib:
+        args.fetch_mode = 'urllib'
+
+    # Pass headless mode to CDP fetch function
+    _try_cdp_fetch._headless_mode = getattr(args, 'headless', 'auto')
+
+    # Lite mode: block media downloads in CDP for 3-5x speedup
+    if getattr(args, 'lite', False) and getattr(args, 'download_assets', False):
+        logging.warning("--download-assets requires full resource loading, disabling --lite")
+        args.lite = False
+    _try_cdp_fetch._lite_mode = getattr(args, 'lite', False)
+
+    # Check for legacy mode environment variable
+    if os.environ.get('WF_LEGACY_IMAGE_MODE'):
+        logging.warning("DEPRECATION: WF_LEGACY_IMAGE_MODE is set. Auto-download behavior will be removed in future versions.")
+        # Set a flag for legacy behavior
+        args.legacy_image_mode = True
+    else:
+        args.legacy_image_mode = False
+    
+    # Validate crawl limits against absolute maximums
+    if args.max_crawl_depth > MAX_CRAWL_DEPTH:
+        logging.warning(f"Requested depth {args.max_crawl_depth} exceeds maximum {MAX_CRAWL_DEPTH}, using {MAX_CRAWL_DEPTH}")
+        args.max_crawl_depth = MAX_CRAWL_DEPTH
+    if args.max_pages > MAX_CRAWL_PAGES:
+        logging.warning(f"Requested pages {args.max_pages} exceeds maximum {MAX_CRAWL_PAGES}, using {MAX_CRAWL_PAGES}")
+        args.max_pages = MAX_CRAWL_PAGES
+    
+    
+    setup_logging(args.verbose)
+
+  
+    input_url = args.url.strip()  # Keep original, unmodified
+    
+
+    # Validate and encode URL for proper Unicode handling
+    url = validate_and_encode_url(args.url)
+    outdir = Path(args.outdir)
+    if not args.stdout:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    # Detect file:// URLs and convert to --html mode
+    is_file_url = url.startswith('file://')
+    if is_file_url:
+        # Extract file path from file:// URL
+        parsed_file_url = urllib.parse.urlparse(url)
+        file_path = urllib.parse.unquote(parsed_file_url.path)
+
+        # Convert file:// URL to local HTML mode
+        logging.info(f"Detected file:// URL, converting to local HTML mode")
+        logging.info(f"Local file path: {file_path}")
+
+        # Set args.html to the file path
+        args.html = file_path
+
+        # Use the file name (without directory path) as URL for display purposes
+        file_name = parsed_file_url.path.split('/')[-1] if '/' in parsed_file_url.path else 'file'
+        url = f"http://localhost/{file_name}"
+        logging.info(f"Using display URL: {url}")
+
+    logging.info(f"Starting webfetcher for URL: {url}")
+    if url != args.url and not is_file_url:
+        logging.info(f"URL encoded from: {args.url}")
+
+  
+  
+    # Reason: Avoid premature HEAD requests that may fail with 405 errors
+    # 原因：避免可能失败并返回 405 错误的过早 HEAD 请求
+    if is_file_url:
+        # For file:// URLs, no network resolution needed
+        # 对于 file:// URL，不需要网络解析
+        host = 'localhost'
+        original_host = 'localhost'
+        logging.info(f"Local file mode: Skipping URL resolution")
+    elif hasattr(args, 'fetch_mode') and args.fetch_mode in ('selenium', 'manual_chrome'):
+        # For explicit Selenium/manual Chrome modes, extract hostname directly without network resolution
+        # 对于显式 Selenium/手动 Chrome 模式，直接从 URL 提取主机名，不进行网络解析
+        host = urllib.parse.urlparse(url).hostname or ''
+        original_host = host
+        logging.info(f"Selenium/manual Chrome mode: Skipping URL resolution to avoid premature network requests")
+    else:
+        # For auto/urllib modes, resolve redirects to get effective host for parser selection
+        # 对于 auto/urllib 模式，解析重定向以获取用于解析器选择的有效主机
+        host = get_effective_host(url, ua=None)  # UA will be determined after this
+        original_host = urllib.parse.urlparse(url).hostname or ''
+
+    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0 Safari/537.36"
+    # Use a mobile WeChat UA for WeChat pages; desktop Chrome UA for XHS
+    if 'mp.weixin.qq.com' in host or 'weixin.qq.com' in host:
+        ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42(0x18002a2c) NetType/WIFI Language/zh_CN'
+    elif 'xiaohongshu.com' in host or 'xhslink.com' in original_host:
+        ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    elif 'dianping.com' in host:
+        ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+
+    # Site crawling mode (overrides single-page fetch)
+    if args.crawl_site:
+        logging.info("Site crawling mode activated / 站点爬取模式已激活")
+
+      
+        if args.follow_pagination:
+            logging.info("Pagination following enabled / 已启用分页跟随")
+        if not args.same_domain_only:
+            logging.warning("Cross-domain crawling enabled - use with caution / 已启用跨域爬取 - 请谨慎使用")
+
+      
+        if args.use_sitemap:
+            logging.info("Sitemap-first crawling enabled / 已启用sitemap优先爬取")
+
+        # Check if supported site type
+        if 'mp.weixin.qq.com' in host or 'xiaohongshu.com' in host or 'xhslink.com' in original_host or 'dianping.com' in host:
+            logging.error("Site crawling not supported for social media sites")
+            sys.exit(1)
+
+      
+        if args.use_sitemap:
+            # Use sitemap-first crawling (with automatic fallback to BFS)
+            crawled_pages = crawl_from_sitemap(
+                url, ua,
+                max_pages=args.max_pages,
+                delay=args.crawl_delay,
+                # Pass additional args for fallback
+                max_depth=args.max_crawl_depth,
+                follow_pagination=args.follow_pagination,
+                same_domain_only=args.same_domain_only
+            )
+        else:
+            # Use regular BFS crawling
+            crawled_pages = crawl_site(
+                url, ua,
+                max_depth=args.max_crawl_depth,
+                max_pages=args.max_pages,
+                delay=args.crawl_delay,
+                follow_pagination=args.follow_pagination,    
+                same_domain_only=args.same_domain_only      
+            )
+        
+        if crawled_pages:
+            # Detect appropriate parser from first page
+            first_html = crawled_pages[0][1]
+            # Always use generic parser for crawling
+            parser_func = generic_to_markdown
+            parser_name = "Generic"
+            
+            logging.info(f"Using {parser_name} parser for site content")
+            
+            # Aggregate all content
+            date_only, md, metadata = aggregate_crawled_site(crawled_pages, parser_func)
+            metadata['parser_used'] = parser_name
+            rendered = False
+            
+            # Process and save file directly in crawl mode
+            # Title for filename comes from first heading
+            m = re.match(r'^#\s*(.+)$', md.splitlines()[0].strip())
+            title = m.group(1) if m else '未命名'
+            # Use current timestamp for filename to avoid conflicts
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+            base = f"{timestamp} - {sanitize_filename(title)}"
+            path = ensure_unique_path(outdir, base)
+            
+            # Optionally download images and rewrite links
+            if hasattr(args, 'legacy_image_mode') and args.legacy_image_mode:
+                # Legacy behavior for backward compatibility
+                do_download_assets = args.download_assets or ('mp.weixin.qq.com' in host) or ('xiaohongshu.com' in host) or ('xhslink.com' in original_host)
+            else:
+                # New default: only download if explicitly requested
+                do_download_assets = args.download_assets
+            if do_download_assets:
+                logging.info("Starting asset downloads")
+                md_base = base  # same base as filename
+                md = rewrite_and_download_assets(md, md_base, outdir, ua, args.assets_root)
+                logging.info("Asset downloads completed")
+            
+            # Determine output formats needed
+            output_markdown, output_html = determine_output_format(args, url)
+
+          
+            crawl_url_metadata = create_url_metadata(
+                input_url=input_url,
+                final_url=url,  # For crawl mode, final URL is typically the starting URL
+                fetch_mode='crawl'
+            )
+
+          
+            md = insert_dual_url_section(md, crawl_url_metadata)
+
+            if getattr(args, 'frontmatter', 'none') == 'yaml':
+                md = apply_yaml_frontmatter(md, url, metadata)
+
+            if args.stdout:
+                print(md)
+                return
+
+            # Write markdown file if requested
+            if output_markdown:
+                path.write_text(md, encoding='utf-8')
+                logging.info(f"Markdown file saved: {path}")
+            
+            # Write HTML file if requested
+            if output_html:
+                try:
+                    html_path = get_html_output_path(args, url, base)
+                    write_html_file(crawled_pages[0][1], html_path, url, title)  # Use first page's HTML
+                    logging.info(f"HTML file saved: {html_path}")
+                except Exception as e:
+                    logging.error(f"Failed to write HTML output: {e}")
+            
+            # Generate JSON output if requested
+            if args.json:
+                json_data = {
+                    'url': url,
+                    'title': title,
+                    'date': f"{date_only} {datetime.datetime.now().strftime('%H:%M:%S')}",
+                    'content': md,
+                    'images': metadata.get('images', []),
+                    'metadata': {
+                        **metadata,
+                        'parser_used': parser_name,
+                        'fetch_method': 'crawl',
+                        'scraped_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                }
+                json_path = path.with_suffix('.json')
+                json_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding='utf-8')
+                logging.info(f"JSON data saved: {json_path}")
+            
+            # Print primary output path(s)
+            if output_markdown and output_html:
+                print(f"{path}\n{html_path}")
+            elif output_html:
+                print(str(html_path))
+            else:
+                print(str(path))
+            return  # Exit the main function after crawling is complete
+            
+        else:
+            logging.error("No pages crawled successfully")
+            sys.exit(1)
+    elif args.html:
+        # Local HTML file
+        html = Path(args.html).read_text(encoding='utf-8', errors='ignore')
+        fetch_metrics = FetchMetrics(primary_method="local_file", final_status="success")
+        rendered = False
+        # Create url_metadata for local file mode
+        url_metadata = create_url_metadata(
+            input_url=input_url or url,
+            final_url=url,
+            fetch_mode='local_file'
+        )
+    else:
+        html = None
+        fetch_metrics = None
+
+      
+      
+        # Show accurate fetch method based on actual mode
+        # 根据实际模式显示准确的获取方法
+        if hasattr(args, 'fetch_mode') and args.fetch_mode == 'selenium':
+            # Explicit Selenium mode - will use Chrome automation
+            # 显式 Selenium 模式 - 将使用 Chrome 自动化
+            logging.info("Fetch decision: Selenium mode (Chrome automation)")
+            should_render = False  # Skip Playwright rendering in Selenium mode
+        elif hasattr(args, 'fetch_mode') and args.fetch_mode == 'manual_chrome':
+            # Manual Chrome mode - interactive Chrome control
+            # 手动 Chrome 模式 - 交互式 Chrome 控制
+            logging.info("Fetch decision: Manual Chrome mode")
+            should_render = False  # Skip Playwright rendering in manual Chrome mode
+        else:
+            # Auto or urllib mode - Playwright rendering only when explicitly requested
+            # Auto 或 urllib 模式 - Playwright 渲染仅在显式请求时触发
+            # Note: JS-heavy sites (WeChat, XHS, Zhihu, etc.) are now routed directly
+            # to CDP via routing.yaml, so hardcoded domain checks are no longer needed.
+            should_render = (args.render == 'always')
+            logging.info(f"Render decision: {'will render' if should_render else 'static fetch only'}")
+
+        if should_render:
+            logging.info("Attempting headless rendering with Playwright")
+            rendered_html, render_metrics = try_render_with_metrics(url, ua=ua, timeout_ms=max(1000, args.render_timeout*1000))
+            if rendered_html:
+                logging.info("Rendering successful")
+                html = rendered_html
+                fetch_metrics = render_metrics
+                rendered = True
+            else:
+                logging.info("Rendering failed, falling back to static fetch")
+                rendered = False
+        else:
+            rendered = False
+            
+        if html is None:
+            logging.info("Fetching HTML statically")
+            # Phase 2: Use selenium-timeout when selenium mode, otherwise use regular timeout
+            fetch_timeout = args.selenium_timeout if args.fetch_mode == 'selenium' else args.timeout
+
+            # Phase 2 Enhancement: Catch Selenium exceptions and exit with non-zero code
+          
+          
+            try:
+                html, fetch_metrics, url_metadata = fetch_html(url, ua=ua, timeout=fetch_timeout, fetch_mode=args.fetch_mode, force_chrome=args.force_chrome, input_url=input_url)
+                logging.info("Static fetch completed")
+                
+
+                # Phase 2: Check if fetch failed
+                if fetch_metrics and fetch_metrics.final_status == "failed":
+                    logging.warning(f"Fetch failed: {fetch_metrics.error_message}")
+                    _save_failure_and_exit(url, outdir, fetch_metrics.primary_method,
+                                          fetch_metrics.error_message, stdout_mode=args.stdout)
+
+            except (ChromeConnectionError, SeleniumNotAvailableError, SeleniumFetchError, SeleniumTimeoutError) as e:
+                logging.error(f"Selenium fetch failed: {e}")
+                print(format_selenium_error(e), file=sys.stderr)
+                _save_failure_and_exit(url, outdir, "selenium", str(e), e, args.stdout)
+
+            except Exception as e:
+                logging.error(f"Fetch failed: {e}")
+                print(f"Error: {e}", file=sys.stderr)
+                _save_failure_and_exit(url, outdir, "urllib", str(e), e, args.stdout)
+
+    # Try to download file if it's a downloadable type
+    if not getattr(args, 'stdout', False):
+        downloader = SimpleDownloader()
+        if downloader.try_download(url, ua, args.timeout, args.outdir):
+            return  # Exit early, skip HTML processing for binary files
+
+    # Optionally save HTML snapshot before parsing
+    if args.save_html and not args.stdout:
+        if args.save_html is True:
+            ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            host_safe = (urllib.parse.urlparse(url).hostname or 'page').replace(':','_')
+            snapshot_path = Path(args.outdir) / f"snapshot_{host_safe}_{ts}.html"
+        else:
+            snapshot_path = Path(str(args.save_html))
+            if snapshot_path.is_dir():
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                host_safe = (urllib.parse.urlparse(url).hostname or 'page').replace(':','_')
+                snapshot_path = snapshot_path / f"snapshot_{host_safe}_{ts}.html"
+        try:
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_text(html, encoding='utf-8')
+            logging.info(f"HTML snapshot saved to: {snapshot_path}")
+        except Exception as e:
+            logging.warning(f"Failed to save HTML snapshot: {e}")
+
+    # Parser selection
+  
+    if 'mp.weixin.qq.com' in host:
+        logging.info("Selected parser: WeChat")
+        parser_name = "WeChat"
+        try:
+            date_only, md, metadata = wechat_to_markdown(html, url, url_metadata)
+        except AntiBotDetectedError:
+            # WeChat returned anti-bot page, retry with CDP
+            logging.warning("WeChat anti-bot detected, retrying with CDP")
+            try:
+                html, fetch_metrics, url_metadata = _try_cdp_fetch(
+                    url, ua=None, timeout=fetch_timeout,
+                    metrics=fetch_metrics, start_time=time.time(),
+                    input_url=input_url, wait_time=5.0,
+                )
+                date_only, md, metadata = wechat_to_markdown(html, url, url_metadata)
+            except AntiBotDetectedError:
+                logging.error("WeChat anti-bot persists after CDP retry")
+                _save_failure_and_exit(url, outdir, "cdp",
+                                       "WeChat anti-bot verification page (环境异常), please open in browser",
+                                       stdout_mode=args.stdout)
+            except Exception as e:
+                logging.error(f"CDP re-fetch failed: {e}")
+                _save_failure_and_exit(url, outdir, "cdp", str(e), e, args.stdout)
+        rendered = 'wechat' in ua.lower()
+    elif 'xiaohongshu.com' in host or 'xhslink.com' in original_host:
+        logging.info("Selected parser: Xiaohongshu")
+        parser_name = "Xiaohongshu"
+        date_only, md, metadata = xhs_to_markdown(html, url, url_metadata)
+        rendered = should_render
+    else:
+        if getattr(args, 'engine', 'v1') == 'v2':
+            logging.info("Selected parser: Generic V2 (competition engine)")
+            parser_name = "Generic_V2"
+            from webfetcher.parsing.engine_v2 import generic_v2
+            date_only, md, metadata = generic_v2(html, url, url_metadata=url_metadata, args=args)
+
+            # V2 自动升级：质量差时逐级尝试更高级的 fetcher
+            # 仅在用户未手动指定 fetch-mode 时触发（auto 模式）
+            # 升级链: urllib → cdp → selenium → manual_chrome（人工托底）
+            if (metadata.get('_v2_quality_low')
+                    and getattr(args, 'fetch_mode', 'auto') == 'auto'):
+                _upgrade_chain = ['cdp', 'selenium', 'manual_chrome']
+                _total_steps = len(_upgrade_chain)
+                for _v2_attempt, next_mode in enumerate(_upgrade_chain, 1):
+                    prev_score = metadata.get('_v2_score', 0)
+                    logging.warning(f"V2 auto-upgrade [{_v2_attempt}/{_total_steps}]: "
+                                    f"→ {next_mode} (prev_score={prev_score:.3f})")
+
+                    # manual_chrome 走专用的人工辅助通道
+                    if next_mode == 'manual_chrome':
+                        if not MANUAL_CHROME_AVAILABLE or manual_chrome_helper is None:
+                            logging.warning("V2 auto-upgrade: manual_chrome not available, skipping")
+                            continue
+                        try:
+                            _mc_start = time.time()
+                            _mc_metrics = FetchMetrics()
+                            html2, fm2, um2 = _try_manual_chrome_fallback(
+                                url, _mc_metrics, _mc_start,
+                                f"V2 quality low (score={prev_score:.3f})",
+                                input_url=input_url,
+                            )
+                            if not html2:
+                                logging.warning("V2 auto-upgrade: manual_chrome returned no HTML")
+                                continue
+
+                            # 解析 html2 拿 new_score（_v2_no_upgrade=True 防递归升级）
+                            # try/finally 保护：generic_v2 抛异常时也要恢复标志位
+                            args._v2_no_upgrade = True
+                            try:
+                                new_date, new_md, new_meta = generic_v2(
+                                    html2, url, url_metadata=um2, args=args)
+                            finally:
+                                args._v2_no_upgrade = False
+                            new_score = new_meta.get('_v2_score', 0)
+
+                            if new_score >= prev_score:
+                                # 接受换 fetcher
+                                html = html2
+                                fetch_metrics = fm2
+                                url_metadata = um2
+                                date_only, md, metadata = new_date, new_md, new_meta
+                                logging.info(f"V2 auto-upgrade success: manual_chrome, "
+                                             f"score: {prev_score:.3f} → {new_score:.3f}")
+                                # manual_chrome 是最后一级，无论 score 多少都 break
+                                break
+                            else:
+                                logging.warning(
+                                    f"V2 auto-upgrade: manual_chrome score {new_score:.3f} "
+                                    f"< prev {prev_score:.3f}, rejected")
+                        except Exception as e:
+                            logging.warning(f"V2 auto-upgrade manual_chrome failed: {e}")
+                        continue
+
+                    # cdp / selenium 走 fetch_html 通道
+                    try:
+                        html2, fm2, um2 = fetch_html(
+                            url, ua=ua, timeout=args.timeout,
+                            fetch_mode=next_mode, force_chrome=True,
+                            input_url=input_url,
+                        )
+                        if not html2:
+                            logging.warning(f"V2 auto-upgrade: {next_mode} returned no HTML, trying next")
+                            continue
+
+                        # 解析 html2 拿 new_score（用 score 而非 len(html2) 做判定）
+                        # try/finally 保护：generic_v2 抛异常时也要恢复标志位
+                        args._v2_no_upgrade = True
+                        try:
+                            new_date, new_md, new_meta = generic_v2(
+                                html2, url, url_metadata=um2, args=args)
+                        finally:
+                            args._v2_no_upgrade = False
+                        new_score = new_meta.get('_v2_score', 0)
+
+                        if new_score >= prev_score:
+                            # 接受换 fetcher：score 不退步就推进
+                            html = html2
+                            fetch_metrics = fm2
+                            url_metadata = um2
+                            date_only, md, metadata = new_date, new_md, new_meta
+                            logging.info(f"V2 auto-upgrade accepted: {next_mode}, "
+                                         f"score: {prev_score:.3f} → {new_score:.3f}, "
+                                         f"HTML={len(html)} chars")
+                            # 链终止判定：score 足够高才停止升级
+                            if new_score >= 0.5:
+                                logging.info(f"V2 auto-upgrade complete: score {new_score:.3f} >= 0.5, stop")
+                                break
+                            # 否则继续升下一级，prev_score 已通过 metadata 更新
+                        else:
+                            logging.warning(
+                                f"V2 auto-upgrade: {next_mode} score {new_score:.3f} "
+                                f"< prev {prev_score:.3f}, rejected (keep prev html)")
+                    except Exception as e:
+                        logging.warning(f"V2 auto-upgrade {next_mode} failed: {e}, trying next")
+                        continue
+
+            # 清理内部信号，不泄露到最终 metadata
+            metadata.pop('_v2_quality_low', None)
+            metadata.pop('_v2_needs_upgrade', None)
+            metadata.pop('_v2_current_fetcher', None)
+            metadata.pop('_v2_score', None)
+        else:
+            logging.info("Selected parser: Generic")
+            parser_name = "Generic"
+            date_only, md, metadata = generic_to_markdown(html, url, getattr(args, 'filter', 'safe'), is_crawling=False, url_metadata=url_metadata)
+        rendered = False
+
+    # Title for filename comes from first heading
+    m = re.match(r'^#\s*(.+)$', md.splitlines()[0].strip())
+    title = m.group(1) if m else '未命名'
+
+    # Post-parse quality check: log if output is suspiciously poor
+    _md_text_len = len(re.sub(r'\[.*?\]\(.*?\)|!\[.*?\]\(.*?\)|^#+\s|^\s*[-*]\s|```.*?```', '', md, flags=re.MULTILINE | re.DOTALL).strip())
+    if _md_text_len < 100 and html and len(html) > 1000:
+        logging.warning(f"Parse output suspiciously short ({_md_text_len} chars from {len(html)} char HTML)")
+        persist_fetch_failure(
+            url=url, input_url=input_url or url,
+            fetchers_tried=[getattr(fetch_metrics, 'primary_method', 'unknown')] if fetch_metrics else ['unknown'],
+            failure_type='parse_poor_output',
+            failure_reason=f'md_text={_md_text_len}_from_html={len(html)}',
+            last_error='',
+            html_size=len(html),
+            validation_details=[f'parser={parser_name}', f'title={title}'],
+            fetch_mode=getattr(args, 'fetch_mode', 'auto'),
+            duration_seconds=fetch_metrics.fetch_duration if fetch_metrics else 0,
+        )
+
+    # Use current timestamp for filename to avoid conflicts
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    base = f"{timestamp} - {sanitize_filename(title)}"
+    path = ensure_unique_path(outdir, base)
+    # Optionally download images and rewrite links
+    if hasattr(args, 'legacy_image_mode') and args.legacy_image_mode:
+        # Legacy behavior for backward compatibility
+        do_download_assets = args.download_assets or ('mp.weixin.qq.com' in host) or ('xiaohongshu.com' in host) or ('xhslink.com' in original_host)
+    else:
+        # New default: only download if explicitly requested
+        do_download_assets = args.download_assets
+    if do_download_assets:
+        logging.info("Starting asset downloads")
+        md_base = base  # same base as filename (includes timestamp)
+        md = rewrite_and_download_assets(md, md_base, outdir, ua, args.assets_root)
+        logging.info("Asset downloads completed")
+    
+    # Add fetch metrics to markdown content if available
+    if fetch_metrics:
+        md = add_metrics_to_markdown(md, fetch_metrics, template_name=metadata.get('template_used'))
+
+  
+    # url_metadata should be available from fetch_html() call
+    md = insert_dual_url_section(md, url_metadata)
+
+    if getattr(args, 'frontmatter', 'none') == 'yaml':
+        md = apply_yaml_frontmatter(md, url, metadata)
+
+    # Log successful fetch
+    _fetchers_tried = []
+    if fetch_metrics:
+        if fetch_metrics.primary_method:
+            _fetchers_tried.append(fetch_metrics.primary_method)
+        if fetch_metrics.fallback_method and fetch_metrics.fallback_method != fetch_metrics.primary_method:
+            _fetchers_tried.append(fetch_metrics.fallback_method)
+    persist_fetch_success(
+        url=url,
+        input_url=input_url,
+        domain=host,
+        fetch_mode=getattr(args, 'fetch_mode', 'auto'),
+        primary_method=fetch_metrics.primary_method if fetch_metrics else 'unknown',
+        fallback_method=fetch_metrics.fallback_method if fetch_metrics else None,
+        fetchers_tried=_fetchers_tried or [fetch_metrics.primary_method if fetch_metrics else 'unknown'],
+        validation_failures=fetch_metrics.validation_failures if fetch_metrics else [],
+        duration_seconds=fetch_metrics.fetch_duration if fetch_metrics else 0,
+        html_size=len(html) if html else 0,
+        headless_auto_launched=fetch_metrics.chrome_auto_launched if fetch_metrics else False,
+        parser=parser_name if 'parser_name' in dir() else 'unknown',
+    )
+
+    if args.stdout:
+        print(md)
+        return
+
+    # Determine output formats needed
+    output_markdown, output_html = determine_output_format(args, url)
+
+    # Write markdown file if requested
+    if output_markdown:
+        path.write_text(md, encoding='utf-8')
+        logging.info(f"Markdown file saved: {path}")
+
+    # Write HTML file if requested
+    if output_html:
+        try:
+            html_path = get_html_output_path(args, url, base)
+            write_html_file(html, html_path, url, title)
+            logging.info(f"HTML file saved: {html_path}")
+        except Exception as e:
+            logging.error(f"Failed to write HTML output: {e}")
+
+    # Generate JSON output if requested
+    if args.json:
+        json_data = {
+            'url': url,
+            'title': title,
+            'date': f"{date_only} {datetime.datetime.now().strftime('%H:%M:%S')}",
+            'content': md,
+            'images': metadata.get('images', []),
+            'metadata': {
+                **metadata,
+                'parser_mode': parser_name,
+                'fetch_method': 'rendered' if rendered else 'static',
+                'scraped_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        }
+        
+        # Add fetch metrics to JSON if available
+        if fetch_metrics:
+            json_data['metadata']['fetch_metrics'] = fetch_metrics.to_dict()
+        json_path = path.with_suffix('.json')
+        json_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding='utf-8')
+        logging.info(f"JSON data saved: {json_path}")
+    
+    # Print primary output path(s)
+    if output_markdown and output_html:
+        print(f"{path}\n{html_path}")
+    elif output_html:
+        print(str(html_path))
+    else:
+        print(str(path))
+
+
+if __name__ == '__main__':
+    main()
