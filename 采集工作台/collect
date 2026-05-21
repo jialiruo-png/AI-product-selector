@@ -3,7 +3,8 @@ set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKBENCH_DIR="$ROOT_DIR/采集工作台"
-WF_BIN="$ROOT_DIR/web-fetcher/.venv/bin/wf"
+WF_BIN="${WF_BIN:-$ROOT_DIR/.venv/bin/wf}"
+PY_BIN="${PY_BIN:-$ROOT_DIR/.venv/bin/python}"
 LIBRARY_DIR="$WORKBENCH_DIR/素材库"
 OPENCLI_BIN="$(command -v opencli || true)"
 if [ -z "$OPENCLI_BIN" ] && [ -x "$HOME/.local/bin/opencli" ]; then
@@ -38,7 +39,7 @@ is_url() {
 }
 
 safe_slug() {
-  "$ROOT_DIR/web-fetcher/.venv/bin/python" - "$1" <<'PY'
+  "$PY_BIN" - "$1" <<'PY'
 import hashlib
 import re
 import sys
@@ -108,7 +109,7 @@ search_weixin_urls() {
   echo "使用 OpenCLI 搜狗微信搜索：$input" >> "$log_file"
   "$OPENCLI_BIN" weixin search "$input" --limit "$limit" -f json > "$TMP_DIR/opencli-search.json" 2>> "$log_file" || return 1
 
-  "$ROOT_DIR/web-fetcher/.venv/bin/python" - "$TMP_DIR/opencli-search.json" "$dest" <<'PY'
+  "$PY_BIN" - "$TMP_DIR/opencli-search.json" "$dest" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -257,8 +258,14 @@ while [ $# -gt 0 ]; do
 done
 
 if [ ! -x "$WF_BIN" ]; then
-  echo "没有找到 web-fetcher 运行环境：$WF_BIN"
-  echo "先确认 web-fetcher/.venv 已安装好。"
+  echo "没有找到 wf 运行环境：$WF_BIN"
+  echo "请先在项目根目录执行：python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+  exit 1
+fi
+
+if [ ! -x "$PY_BIN" ]; then
+  echo "没有找到 Python 运行环境：$PY_BIN"
+  echo "请先在项目根目录执行：python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt"
   exit 1
 fi
 
