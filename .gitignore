@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -20,5 +21,5 @@ venv/
 采集工作台/logs/
 *.log
 
-# probe --dump 落盘的原始 JSON
-/tmp/dy_probe_*.json
+# SQLite 数据库（每次跑都会写入）
+采集工作台/outputs/*.db
