@@ -17,6 +17,7 @@ venv/
 
 # Runtime outputs
 采集工作台/素材库/
+采集工作台/草稿库/
 采集工作台/outputs/
 采集工作台/topics/
 采集工作台/logs/
@@ -27,3 +28,6 @@ venv/
 assets/
 images/
 media/
+
+# TikHub 去重缓存
+采集工作台/.tikhub_seen_notes.json
