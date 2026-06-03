@@ -15,19 +15,10 @@ venv/
 .idea/
 .vscode/
 
-# Runtime outputs
-采集工作台/素材库/
-采集工作台/草稿库/
+# 运行产物
 采集工作台/outputs/
-采集工作台/topics/
 采集工作台/logs/
 *.log
 
-# Temporary media generated during collection
-*-media/
-assets/
-images/
-media/
-
-# TikHub 去重缓存
-采集工作台/.tikhub_seen_notes.json
+# probe --dump 落盘的原始 JSON
+/tmp/dy_probe_*.json

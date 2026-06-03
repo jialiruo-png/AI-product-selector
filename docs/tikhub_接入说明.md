@@ -1,6 +1,7 @@
-# TikHub API 接入说明（实测版）
+# TikHub API 接入说明（选品·实测版）
 
 > 测试时间 2026-06-03，全部端点用真实 key 实测。
+> 本工具的选品数据源为 **TikTok Shop** + **小红书**（抖音端无关键词商品搜索，见下）。
 
 ## 一、基础配置
 
@@ -15,111 +16,149 @@
 
 返回统一包装：`{code, data, message, request_id, ...}`，`code==200` 为成功。
 
-## 二、小红书（✅ 全链路实测通过）
+## 二、抖音/TikTok 电商（✅ 实测，2026-06-03）—— 选品数据源
 
-### 搜索笔记（生产用 App 端，web_v3 上游易故障）
+### 关键结论：抖音无商品搜索，选品走 TikTok Shop 命名空间
+- **抖音(`/douyin/`)没有「关键词→商品」搜索，也没有独立商品详情。**
+  其电商端点全部需要你**已持有 ID**：
+  - `web/fetch_product_review_list`（要 `product_id`+`shop_id`）
+  - `web/fetch_product_review_score`（要 `product_id`+`shop_id`）
+  - `web/fetch_product_sku_list`（要 `product_id`+`author_id`）
+  - `web/fetch_live_room_product_result`（要 `room_id`+`author_id`）
+  → 无法从关键词冷启动，只能从直播间/分享链接/已知商品反查，不适合做选品入口。
+- **TikTok Shop(`/tiktok/shop/web/`)有完整漏斗，且打分字段全在免费搜索端。**
+
+### 漏斗与字段（实测路径）
+
+**① 商品搜索（免费拿全量打分字段）**
 ```
-GET /api/v1/xiaohongshu/app/search_notes
-    keyword（必填） page=1 sort=general noteType=_0
+GET /api/v1/tiktok/shop/web/fetch_search_products_list
+    search_word（必填） offset=0 page_token="" region=US
 ```
-返回 `data.data.items[]`，过滤 `model_type=="note"`，取每条 `it["note"]`，单条自带：
-- `id` → note_id；`xsec_token`（**note 顶层**）→ 详情接口的 xsec_token
-- `title` 标题；`desc` **正文预览（上游硬截断 ≈60 字，拿不到更多）**
-- `liked_count / collected_count / comments_count / shared_count` 互动数（**齐全**）
-- `images_list[].url`（或 `url_size_large`）→ **全部图片 URL，张数完整**
-- `user.nickname` 作者
+返回 `data.data.data.products[]`，**每条自带打分所需全部字段**：
+- `product_id`、`title`、`image.url_list[]`（图片，免费）
+- `product_price_info.sale_price_decimal` → **价格**
+- `rate_info.score`(4.7) + `rate_info.review_count`(22) → **评分 + 评论数**
+- `sold_info.sold_count`(101) → **销量**
+- `seller_info.{seller_id,shop_name}`、`brand_info.brand_name` → **店铺/品牌（竞品维度）**
+- 翻页：页级 `has_more` + `load_more_params` + `page_token`
 
-> 备用：`web_v3/fetch_search_notes`（page/sort/note_type=0）字段名为驼峰
-> （`xsecToken`、`noteCard.displayTitle`），但上游搜索时常 400，生产勿用。
+**② 商品评论（情感/痛点原料，仅 Top-N 调用）**
+```
+GET /api/v1/tiktok/shop/web/fetch_product_reviews_v2
+    product_id（必填） page_start=1 region=US
+    sort_rule / filter_type / filter_value（可选）
+```
+⚠️ **`page_start` 从 1 起，传 0 返回空 `data:{}`**。返回 `data.data.data.product_reviews[]`：
+- `review_rating`(1-5) → **差评率/评分分布**
+- `review_text` → **情感/痛点文本**（实测约 1/3 评论带文字，其余仅星级）
+- `review_time`、`is_verified_purchase`、`review_images[]`、`review_country`
+- 页级 `total_reviews`、`has_more`
 
-### 图文详情
+**③ 商品详情（价值低，可跳过）**
+- `web/fetch_product_detail`、`_v3`：v1 受 region 限制常回 `error_code`；
+  v3 只回页面渲染 config（`page_config.components_map`），**无干净长描述字段**。
+- 结论：**选品打分完全用免费搜索端即可，无需付费详情。**
+
+### 降本结构（搜索免费筛 → Top-N 才花钱）
+| 步骤 | 端点 | 何时调 | 成本 |
+|---|---|---|---|
+| 搜索筛选 + 打分 | `fetch_search_products_list` | 每次（翻页） | 搜索价 |
+| 评论情感/痛点 | `fetch_product_reviews_v2` | **仅评分 Top-N** | 评论价 |
+| 商品详情 | ~~fetch_product_detail_v3~~ | **不调**（无干净字段） | 0 |
+
+> 三件事数据可得性：①打分排序=免费搜索端全字段可做；②情感/痛点=Top-N 评论可做；
+> ③竞品/趋势=搜索端 seller_info/brand_info + 按时间重复搜索对比销量/价格可做。
+
+### 注意：上游间歇 400（不扣费）
+`fetch_search_products_list` 等会偶发 `400 {"message":"...Please retry...You won't be charged"}`，
+属 TikHub 上游临时故障、**不扣费**，重试 2~3 次即可（probe 脚本已内置 400 重试）。
+`fetch_search_products_list_v2` / `app/v3/fetch_product_search` 实测更易 400，生产用 **V1**。
+
+## 三、小红书（✅ 实测，2026-06-03）—— 选品的内容/口碑维度
+
+小红书有**两条互补漏斗**，命名空间分别在 `app_v2`（商品）和 `web_v3`（笔记），
+分别承担「选品打分」和「种草热度 / 口碑趋势」。
+
+### 漏斗 ① 商品（选品打分核心，`/xiaohongshu/app_v2/`）
+
+**① 商品搜索（免费拿打分字段）**
+```
+GET /api/v1/xiaohongshu/app_v2/search_products
+    keyword（必填） page=1 search_id="" sort/scope/min_price/max_price（可选）
+```
+返回 `data.data.module.data[]` 卡片，取 `card_name` 含 `goods` 的卡，`content` 自带：
+- `id`（= **sku_id**）、`title`
+- `price_info.{price, origin_price, foreign_price}` → **价格**
+- `image[].url` → **主图**（免费）
+- `vendor.{vendor_name, seller_id, vendor_link}` → **店铺（竞品维度）**
+- `tag_strategy_map.*` → 促销 / 库存 / 上新标
+- 翻页：页级 `next_page` + `search_id`
+
+**② 评分概览（便宜的差评率原料）**
+```
+GET /api/v1/xiaohongshu/app_v2/get_product_review_overview
+    sku_id（必填） tab=2
+```
+返回 `data.{avgScore, total, scoreToCnt{1..5}, purchaseHistoryCount}` → **评分分布 / 差评率 / 销量**。
+
+**③ 商品评论（情感/痛点文本，仅 Top-N 调）**
+```
+GET /api/v1/xiaohongshu/app_v2/get_product_reviews
+    sku_id（必填） page=0 sort_strategy_type=0 share_pics_only=0
+```
+返回 `data.reviews[]`。⚠️ 与 TikTok 一致：**跨境 / 冷门商品评论常为空或仅星级**，文本评论占比有限。
+`app_v2/get_product_detail`（需 `sku_id`）长描述价值有限，按需调。
+
+### 漏斗 ② 笔记（种草 / 口碑 / 趋势，`/xiaohongshu/web_v3/`）
+
+**① 笔记搜索（免费拿互动热度）**
+```
+GET /api/v1/xiaohongshu/web_v3/fetch_search_notes
+    keyword（必填） page=1 sort/note_type（可选）
+```
+返回 `data.data.items[]`，取 `modelType=="note"`，`noteCard` 自带：
+- `displayTitle`、`cover.urlDefault`、`type`(normal / video)
+- `user.{nickname, userId}`
+- `interactInfo.{likedCount, collectedCount, commentCount, sharedCount}` → **互动热度**
+- note 级 `id` + `xsecToken`（**详情 / 评论必须带 `xsec_token`**）
+
+**② 笔记详情（正文 + 话题标签）**
 ```
 GET /api/v1/xiaohongshu/web_v3/fetch_note_detail
     note_id（必填） xsec_token（必填）
 ```
-返回 `data.data.items[0].noteCard`（`data` 可能为 null，需空安全取）：
-- `title` 标题，`desc` **完整长正文（几百~上千字，详情唯一不可替代的价值）**
-- `tagList[].name` 标签
-- `interactInfo` 互动数据（与搜索端一致）
-- `imageList[].urlDefault` 高清图 URL（**张数与搜索端相同，不为图片多花钱**）
+返回 `data.data.items[0].noteCard.{title, desc, tagList[], imageList, time}` → 正文与话题词（选品语义/选词）。
 
-### 搜索 vs 详情：哪步能用脚本代替（决定成本）
+**③ 笔记评论（真实声音 / 痛点的另一来源）**
+```
+GET /api/v1/xiaohongshu/web_v3/fetch_note_comments
+    note_id（必填） xsec_token（必填）
+```
+返回 `data.data.comments[]`，每条 `content / likeCount / ipLocation / userInfo / subComments`，页级 `hasMore`。
 
-| 数据 | 搜索端 | 详情端 | 能否脚本代替 |
+### 降本结构（与 TikTok 同：搜索免费筛 → Top-N 才花钱）
+| 步骤 | 端点 | 何时调 | 成本 |
 |---|---|---|---|
-| 图片 URL（全张） | ✅ 全有 | 相同 | ✅ 搜索端直接拿，零额外成本 |
-| 互动数 / 标题 / 作者 | ✅ 全有 | 相同 | ✅ 搜索端直接拿 |
-| 正文 | ⚠️ 仅前 ≈60 字 | ✅ 完整长文 | ❌ **唯一必须花钱补的步骤** |
+| 商品搜索 + 打分 | `app_v2/search_products` | 每次（翻页） | 搜索价 |
+| 笔记搜索 + 热度 | `web_v3/fetch_search_notes` | 每次（翻页） | 搜索价 |
+| 商品评分概览 | `app_v2/get_product_review_overview` | 仅 Top-N | 概览价 |
+| 商品 / 笔记评论 | `app_v2/get_product_reviews`、`web_v3/fetch_note_comments` | **仅 Top-N** | 评论价 |
 
-**单价**：搜索 $0.01/页（20条），详情 $0.01/**条**。结论：图片/互动/预览全免费白拿，
-只在「值得的笔记」上花钱补长正文 → 详情只对评分 Top-N 调用。
+> 三件事数据可得性：①打分排序=`search_products` 价格 + `review_overview` 评分/销量；
+> ②情感/痛点=商品评论 + 笔记评论双来源；
+> ③竞品/趋势=笔记 `interactInfo` 热度 + 商品 `vendor` 店铺，按时间重复搜对比。
 
-> ⚠️ 对比 OpenCLI（浏览器自动化）：只能小批量、慢、易触发风控封号；
-> TikHub 走官方代理池，可批量、稳定、无封号风险，差价就买的是这个。
-
-## 三、知乎（✅ 搜索实测通过，正文自带）
-
-### 文章/回答搜索
-```
-GET /api/v1/zhihu/web/fetch_article_search_v3
-    keyword（必填） offset=0 limit=20
-```
-返回 `data.data[]`，过滤 `type=="search_result"`（去掉 `knowledge_ad` 广告）。
-每条 `object`：
-- `id`、`type`（answer/article）、`title`
-- `content` **已是完整正文 HTML，无需再调详情接口**
-- `excerpt` 摘要，`voteup_count` 赞同，`comment_count`、`favorites_count`
-- `question.{id,name}`、`author.name`、`created_time`
-
-## 四、公众号（⚠️ 上游临时不可用）
+## 四、复测脚本
 
 ```
-GET /api/v1/wechat_mp/web/fetch_search_article
-    keyword（必填） offset=0 sort_type=_0
-```
-实测连续返回 400（含官方 demo 参数），属 **TikHub 上游微信搜索故障**（该情况不扣费）。
-应用层需重试 + 失败回退 OpenCLI。其余详情类端点：
-- `fetch_mp_article_detail_json` 文章详情
-- `fetch_mp_article_list` 号内文章列表
-- `fetch_search_official_account` 搜号
-
-## 五、字段映射到现有 collect_any.py
-
-现有 `enrich_scores` 评分用的 key（likes/collects/comments/votes...）已通过 `first_present`
-多名兼容，TikHub 字段（likedCount/collectedCount/voteup_count）大多能对上，
-新增映射时补到对应 keys 列表即可。
-
-## 六、降本：筛选漏斗 + 三路分流（tikhub_xhs_collect.py）
-
-一次搜索（$0.01/20条）拿回全部图片+预览+互动后，**先用免费数据筛，再按结果分三路**，
-只在达标且高分的笔记上花详情钱：
-
-| 分流 | 判定 | 去向 | 是否花详情钱 |
-|---|---|---|---|
-| **重复** | note_id 已在去重缓存 | 跳过，不落盘 | 否（零成本） |
-| **未达标** | 正文<40字 / 标题含求助·问句词 | **草稿库**（带图，标注未达标原因，供人工二筛） | 否 |
-| **达标** | 通过筛选 | **素材库**，仅评分 Top-N 调详情补长正文 | 仅 Top-N |
-
-- 去重缓存：`采集工作台/.tikhub_seen_notes.json`（已 gitignore），素材库+草稿库的
-  note_id 都进缓存，跨次运行同关键词不重复落盘。
-- 草稿库：`采集工作台/草稿库/{日期}-小红书-{关键词}/`（已 gitignore），按关键词累积。
-- 实测：抓 8 条仅花 ≈$0.03（旧方案每条都调详情 $0.09），省 67%；
-  `--detail-top 0` 完全不调详情时省 87%。
-
-### 用法
-```bash
-# 默认：筛选 + Top5 调详情 + 去重，未达标进草稿库
-python3 采集工作台/scripts/tikhub_xhs_collect.py "关键词" --limit 15
-
-# 最省：完全不调详情，只要图片+预览
-python3 采集工作台/scripts/tikhub_xhs_collect.py "关键词" --detail-top 0
-
-# 调更多长文 / 放宽正文门槛 / 强制重抓
-... --detail-top 10 --min-desc 30 --no-cache
+python3 采集工作台/scripts/tikhub_douyin_probe.py "labubu"          # 抖音/TikTok 电商选品漏斗
+python3 采集工作台/scripts/tikhub_douyin_probe.py --dump            # 把原始 JSON 落 /tmp 供查字段
+python3 采集工作台/scripts/tikhub_xiaohongshu_probe.py "口红"        # 小红书商品+笔记双漏斗
+python3 采集工作台/scripts/tikhub_xiaohongshu_probe.py "口红" --dump # 把原始 JSON 落 /tmp 供查字段
 ```
 
-## 七、复测脚本
-
-```
-python3 采集工作台/scripts/tikhub_probe.py "关键词"
-```
+## 五、待办
+- region 目前实测 `US`（TikTok Shop 美区数据最全）；若要中文/东南亚选品需试 `MY/GB/ID` 等。
+- 小红书商品 / 笔记评论在跨境 / 冷门 sku 上常为空，热门词（如 `口红`）笔记评论充足。
+- 正式采集脚本 `tikhub_douyin_product_collect.py` / `tikhub_xiaohongshu_collect.py` 尚未写（按指示先探接口，未急于落库）。
