@@ -230,3 +230,76 @@ python3 -m agent.run "口红" --category 美妆 --mock
 
 `docs(diagnosis): add skill writing spec and v1 acceptance cases`
 
+---
+
+## 批次 7：经营诊断子图 Day 1 — Skill MD 与 Wiki 种子（贾丽婼）
+
+> 更新日期：2026-06-04 晚
+> 负责人：贾丽婼（Liruo）
+> 分支：`运营`
+> 状态：开发 Day 1 完成，Day 2 准备进入节点骨架
+
+**功能说明**
+
+Day 1 落地经营诊断子图的所有"配置即知识"层资产，纯 MD 文件，零代码改动：
+
+- **3 个通用 Skill MD**（`agent/skills/`）：
+  - `jingying_zhenduan.md`：经营诊断专家（入口调度）
+  - `guiyin.md`：归因专家（MECE 拆维度 + 跨场景 + 非数据信号检索）
+  - `xingdong_jianyi.md`：行动建议专家（资源挂钩 + 准入校验 + 性价比排序）
+  - 串联链路验证：`经营诊断 → 归因 → 行动建议 → 经营总结`
+
+- **6 个女装 overlay**（`agent/skills/category_overlays/`）：
+  - `nvzhuang_zibo.md`：自播店（直播间 + 主图 + 千川直播）
+  - `nvzhuang_dabo.md`：达播店（达人选品 + 精选联盟 + 品牌专场）
+  - `nvzhuang_huojia.md`：货架店（搜索 + 评价 + 商城精选）
+  - `nvzhuang_xindian.md`：新店冷启动（突破 0 分 + 新手任务，注：与甘华梁的"选品冷启动"不同）
+  - `nvzhuang_chengzhang.md`：成长期（千川优化 + 渠道破局 + 跨子图路由到甘华梁选品专家）
+  - `nvzhuang_jijie.md`：季节切换期（滞销清仓 + 应季备货 + 投流倾斜）
+
+- **4 份行业 Wiki 种子 MD**（`agent/wiki/industry/`）：
+  - `category_baseline.md`：女装 6 个细分场景的健康度基线
+  - `activity_db.md`：10 个女装相关平台活动条目（含准入门槛 / 历史命中率 / 预估收益）
+  - `tool_db.md`：23 个官方工具入口（AIGC / SEO / 千川 / 达人 / 商城 / 话术 / 任务）
+  - `rule_changes.md`：5 条近 30 天规则变动 + 2 条预告（解决"AI 不处理非数据信号"短板）
+
+**关键设计决定**
+
+1. **格式对齐甘华梁**：Skill MD 采用甘华梁现有的 6 章节格式（`# Skill: 名字` + `## 1.角色定义` 到 `## 6.输出规范`），确保 `agent/skills/loader.py` 能零改动解析
+2. **next_skill 用 markdown 列表格式**：写在 `## 6.输出规范` 段尾的 `- next_skill: "X"`，便于 loader 的 regex 命中
+3. **强制约束写在输出规范段**：每个 Skill 都列出"强制约束 + 红线"，让 LLM 行为可预测
+4. **资源挂钩硬规则**：行动建议专家产出的每条 action 必须有 `resource.url`，禁止空建议（专治抖店现有 AI "去优化主图" 类空话）
+5. **类目 overlay 不独立调工具**：作为主专家的特化层，由主专家命中后合并加载
+
+**主要文件**
+
+新增（13 个 MD 文件）：
+- `agent/skills/{jingying_zhenduan,guiyin,xingdong_jianyi}.md`
+- `agent/skills/category_overlays/{nvzhuang_zibo,nvzhuang_dabo,nvzhuang_huojia,nvzhuang_xindian,nvzhuang_chengzhang,nvzhuang_jijie}.md`
+- `agent/wiki/industry/{category_baseline,activity_db,tool_db,rule_changes}.md`
+
+修改：
+- `update.md`：追加本批次
+
+**回归验证**
+
+- ✅ `python3 -m compileall -q agent` 通过
+- ✅ `python3 -m agent.run "口红" --category 美妆 --mock` 跑通甘华梁冷启动子图（9 节点全执行，57 条证据引用）
+- ✅ `load_skills()` 加载 8 个 Skill（甘华梁 5 + 贾丽婼 3）+ 6 个 overlay
+- ✅ `skill_chain("经营诊断")` 返回 `['经营诊断', '归因', '行动建议', '经营总结']`
+
+**价值**
+
+把"诊断子图怎么思考、看哪些指标、挂哪些资源、避哪些雷"全部沉淀到可被业务侧修改的 MD。Day 2 写节点代码时只需调用 `load_skills()` 取 SOP，不再有硬编码 prompt。
+
+**下一步（Day 2）**
+
+- 新增 `agent/nodes/diagnosis/{checker,attributor,advisor,composer}.py` 四个节点
+- 扩展 `agent/state.py`（仅添加字段：`anomalies / root_cause_chains / actions`，不改现有）
+- LangGraph 子图编排（`AGENT_USE_LANGGRAPH=1` 走 LangGraph，MiniGraph 兜底）
+- 5 份 mock 商家 JSON（`agent/mocks/shops/case_{1..5}.json`）按抖店罗盘字段还原
+- Hub 路由扩展（PR 提给甘华梁）
+
+**提交信息**
+
+`feat(diagnosis): add day-1 skill md and wiki seeds`
