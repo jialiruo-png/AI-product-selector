@@ -8,6 +8,7 @@ from .analyzers import (
     CompetitorAnalyzer,
 )
 from .aggregate import Collector, Curator, Briefing, Editor
+from .persist import Persist
 
 __all__ = [
     "BaseNode",
@@ -18,6 +19,7 @@ __all__ = [
     "CompetitorAnalyzer",
     "Collector",
     "Curator",
+    "Persist",
     "Briefing",
     "Editor",
 ]

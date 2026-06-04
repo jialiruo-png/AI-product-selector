@@ -346,6 +346,9 @@ class CompetitorAnalyzer(BaseNode):
             "word_cloud": [],
         }
         refs = []
+        # 原始评论 + 分析结果按商品收集，供下游 Persist 节点落库
+        # （save_reviews 需原始评论、save_pain_points 需 analysis；本节点分析完别丢）。
+        review_raw: list[dict] = []
         if fetch is not None and analyze is not None:
             for p in products[:2]:
                 pid = p.get("product_id")
@@ -364,6 +367,12 @@ class CompetitorAnalyzer(BaseNode):
                 hls = an.get("highlights", []) or []
                 review_insights["pain_points"].extend(pps)
                 review_insights["highlights"].extend(hls)
+                review_raw.append({
+                    "product_id": pid,
+                    "reviews": reviews,
+                    "analysis": {"pain_points": pps, "highlights": hls,
+                                 "sentiment": an.get("sentiment", {})},
+                })
                 for pp in pps:
                     label = pp.get("label") if isinstance(pp, dict) else str(pp)
                     refs.append(new_evidence_ref(
@@ -390,6 +399,7 @@ class CompetitorAnalyzer(BaseNode):
         note = f"竞品 {len(competitors)} 个，词云 {len(word_cloud)} 词"
         return {
             "competitor_data": competitor_data,
+            "review_raw": review_raw,
             "evidence_refs": self._merge_refs(state, refs),
             "_trace": [self._trace_entry(note)],
         }
