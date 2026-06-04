@@ -341,6 +341,11 @@ with col2:
 
 **Day 4 收尾时**：把占位换成真实 `from agent.run import run; result = run(case_id, mock=True)`。
 
+> 2026-06-05 更新：主窗口 Day 2 完成 4 节点子图后，副窗口已提前把 demo 接通真实
+> `agent.graph.run_diagnosis`（mock 模式），不再等 Day 4。当前 demo 直接渲染 composer
+> 生成的完整 markdown 报告 + 结构化下钻面板（异常清单 / 根因链 / 行动建议 / 证据引用 / 节点 trace）。
+> 副窗口仍只 import `agent.graph`，不修改 `agent/*` 任何文件。
+
 **新增依赖**：`streamlit` 必入 `requirements.txt`。
 
 ---

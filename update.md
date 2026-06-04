@@ -641,3 +641,55 @@ $ python3 -m agent.run "为什么我的店卖不动" --shop-id case_1 --diagnosi
 **提交信息**
 
 `feat(diagnosis): wire real llm + enhance root cause / actions / opening`
+
+---
+
+## 批次 X+4 · 副窗口 · Streamlit demo 提前接通真实 Agent（2026-06-05）
+
+**背景**
+
+主窗口已经把诊断子图 4 节点跑通，但 Streamlit demo 还停在"占位"——按钮点了只显示静态文本和异常表，未调用真实 Agent。本批次把 demo 接通 `agent.graph.run_diagnosis`，让面试演示能"点一下就出完整诊断报告 + 证据引用 + 行动建议"，不再等 Day 4 收尾。
+
+**修改**
+
+- `demo/streamlit_app.py`（重写，约 200 行）：
+  - 模块加载时 `os.environ.setdefault("AGENT_MOCK", "1")`，确保所有节点走 mock 分支
+  - `run_diagnosis_cached(case_id, user_query, window)` 用 `@st.cache_data` 按三元组 key 缓存，避免重复跑
+  - "跑一次诊断"按钮：实时 `asyncio.run(run_diagnosis(...))`，结果存 `st.session_state`，换 case 自动清空
+  - 主区直接 `st.markdown(final_state["report"])` 渲染 composer 生成的完整 markdown ——商家在抖店 AI 助手卡片里会看到的形态
+  - 顶部 4 个 metric：数据完整度 / 命中 overlay / 节点执行 / 证据引用
+  - 6 个结构化下钻 expander：异常清单（表格）/ 根因链（按异常分组）/ 非数据信号（warning 卡片）/ 行动建议（表格含资源 URL）/ 证据引用表（表格）/ 节点 trace
+  - 1 个 debug expander：完整 final_state
+
+- `CLAUDE.md` §11.3 任务 B 段尾追加注解（不改原内容）：标记"已提前接通真实 Agent，不再等 Day 4"，明确副窗口只 import `agent.graph` 不动 `agent/*` 文件
+
+**回归验证**
+
+- ✅ `pip3 install "streamlit>=1.36.0"` 装好 streamlit 1.58.0 + 依赖（pandas / altair / pyarrow 等）
+- ✅ `python3 -m py_compile demo/streamlit_app.py` 通过
+- ✅ `streamlit run demo/streamlit_app.py --server.headless true` 启动成功，`/_stcore/health` 返回 200
+- ✅ 直跑 `asyncio.run(run_diagnosis({'shop_id':'case_1', ...}))`：6 异常 / 6 根因链 / 9 actions / 36 证据引用 / 4 节点 trace
+- ✅ `python3 -m agent.run "我店铺最近 GMV 跌了" --shop-id case_1 --diagnosis --mock` CLI 仍跑通（未触代码）
+
+**未触碰主窗口在改的文件**
+
+主窗口当前 working tree 仍有 modified：`agent/nodes/diagnosis/{advisor,attributor,checker,composer}.py` + untracked `agent/llm.py`。本批次仅 import `agent.graph.run_diagnosis`（公共接口），不修改 `agent/*` 任何文件。git add 精确指定 `demo/streamlit_app.py` + `CLAUDE.md` + `update.md` + `requirements.txt`（如果需要）。
+
+**演示形态**
+
+```bash
+pip install -r requirements.txt
+streamlit run demo/streamlit_app.py
+# 浏览器打开 http://localhost:8501
+```
+
+1. 左侧栏选 `case_1 · 咖喱生活`
+2. 点"跑一次诊断"——spinner "Agent 思考中…（checker → attributor → advisor → composer）"
+3. 1 秒内出完整报告：核心问题（千川 ROI 跌 55.6%）+ 异常清单 + 根因链 + 非数据信号 + 9 条行动建议（每条挂资源 URL）+ 36 条证据引用表
+4. 6 个下钻 expander 给面试官追问技术细节用
+
+**对应 09 演示话术第 4 节（演示 90s）**：现在能边讲边点，不用再说"占位等 Day 3"。
+
+**提交信息**
+
+`feat(demo): wire streamlit to real run_diagnosis (skip day-4 wait)`
