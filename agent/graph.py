@@ -223,3 +223,121 @@ async def run_insight(initial_state: dict, use_langgraph: bool | None = None) ->
     if hasattr(app, "ainvoke"):
         return await app.ainvoke(initial_state)
     return await app.run(initial_state)
+
+
+# --------------------------------------------------------------------------- #
+# 在运营商家诊断子图（贾丽婼 - Day 2）
+# --------------------------------------------------------------------------- #
+# 与商机洞察子图独立——共用 MiniGraph 同款 _merge_partial 行为，
+# 但节点链路是线性的：checker → attributor → advisor → composer。
+# 不动甘华梁的 InsightState / build_graph / run_insight，独立 run_diagnosis 入口。
+
+def _init_diagnosis_nodes() -> dict[str, Any]:
+    """实例化诊断子图全部节点。"""
+    from agent.nodes.diagnosis import Advisor, Attributor, Checker, Composer
+    return {
+        "checker": Checker(),
+        "attributor": Attributor(),
+        "advisor": Advisor(),
+        "composer": Composer(),
+    }
+
+
+class DiagnosisMiniGraph:
+    """诊断子图运行器（线性链路，无并行节点）。
+
+    执行顺序::
+        checker -> attributor -> advisor -> composer
+    """
+
+    def __init__(self) -> None:
+        self.nodes = _init_diagnosis_nodes()
+
+    async def run(self, initial_state: dict) -> dict:
+        state: dict[str, Any] = dict(initial_state or {})
+        for key in ("checker", "attributor", "advisor", "composer"):
+            _merge_partial(state, await self.nodes[key].run(state))
+        return state
+
+
+def _build_diagnosis_langgraph_app():
+    """诊断子图 LangGraph 后端。
+
+    节点链路线性，所以不需要复杂的 reducer——仅 evidence_refs / _trace
+    用 operator.add 拼接即可。
+    """
+    import operator
+    from typing import Annotated, TypedDict
+
+    from langgraph.graph import StateGraph
+
+    class _DiagnosisGraphState(TypedDict, total=False):
+        # inputs
+        shop_id: str
+        user_query: str
+        window: str
+        # 中间产物
+        shop_profile: dict
+        shop_metrics: dict
+        diagnosis_summary: str
+        anomalies: list
+        matched_overlays: list
+        data_completeness: float
+        root_cause_chains: list
+        non_data_signals: list
+        actions: list
+        top_n_for_user: list
+        report: str
+        # 拼接合并字段
+        evidence_refs: Annotated[list, operator.add]
+        messages: Annotated[list, operator.add]
+        _trace: Annotated[list, operator.add]
+
+    nodes = _init_diagnosis_nodes()
+    wf = StateGraph(_DiagnosisGraphState)
+
+    for label, inst in nodes.items():
+        wf.add_node(label, inst.run)
+
+    wf.set_entry_point("checker")
+    wf.add_edge("checker", "attributor")
+    wf.add_edge("attributor", "advisor")
+    wf.add_edge("advisor", "composer")
+    wf.set_finish_point("composer")
+
+    compiled = wf.compile()
+
+    class _DiagnosisLangGraphApp:
+        backend = "langgraph"
+
+        def __init__(self, app):
+            self._app = app
+
+        async def ainvoke(self, state: dict) -> dict:
+            return await self._app.ainvoke(state)
+
+    return _DiagnosisLangGraphApp(compiled)
+
+
+def build_diagnosis_graph(use_langgraph: bool | None = None):
+    """构建诊断子图运行后端。
+
+    与 build_graph 行为一致：默认 MiniGraph，AGENT_USE_LANGGRAPH=1 走 LangGraph。
+    """
+    if _want_langgraph(use_langgraph):
+        try:
+            return _build_diagnosis_langgraph_app()
+        except ImportError:
+            return DiagnosisMiniGraph()
+    return DiagnosisMiniGraph()
+
+
+async def run_diagnosis(initial_state: dict, use_langgraph: bool | None = None) -> dict:
+    """运行在运营商家诊断子图，返回最终合并后的 state dict。
+
+    入参（initial_state）至少要含 shop_id（mock 模式从 agent/mocks/shops/ 加载）。
+    """
+    app = build_diagnosis_graph(use_langgraph=use_langgraph)
+    if hasattr(app, "ainvoke"):
+        return await app.ainvoke(initial_state)
+    return await app.run(initial_state)

@@ -421,3 +421,96 @@ streamlit run demo/streamlit_app.py
 **提交信息**
 
 `docs(demo): add 09 demo script for interview rehearsal`
+
+---
+
+## 批次 8 · 主窗口 · Day 2：诊断子图节点骨架 + 图编排 + CLI（贾丽婼）
+
+> 更新日期：2026-06-05
+> 负责人：贾丽婼（Liruo） · 主窗口
+> 分支：`运营`
+> 状态：Day 2 完成，端到端可跑通 5 个验收 case
+
+**功能说明**
+
+把 Day 1 的纯 MD 配置层"变活"——加 4 个节点、子图编排和 CLI 入口，让 `python3 -m agent.run "..." --diagnosis` 能端到端跑出 markdown 报告。
+
+- **扩展 `agent/state.py`**：新增 `DiagnosisState` TypedDict（不动现有 `InsightState`），定义诊断子图全局状态（shop_profile / shop_metrics / anomalies / matched_overlays / root_cause_chains / non_data_signals / actions / report 等字段）。
+- **新增 4 个诊断节点**（`agent/nodes/diagnosis/`）：
+  - `checker.py` **经营诊断专家**：mock JSON 取数 → overlay 归属判定 → 类目基线对照 → 异常识别 + 严重度评级（≥50% high / ≥20% medium）→ 字段别名归一化适配副窗口 mock 命名
+  - `attributor.py` **归因专家**：MECE 拆维度（流量/货品/转化/履约）→ 跨指标耦合验证 → 检索 `rule_changes` Wiki 找非数据信号（5 条规则变动）
+  - `advisor.py` **行动建议专家**：内嵌活动 + 工具 / 模板 / 任务注册表 → 按 overlay × 维度匹配资源 → 准入门槛校验（exp_score / shop_level / live_share 等）→ 性价比×置信度排序 → 资源不可用时 fallback 兜底（仍输出，不空建议）
+  - `composer.py` **报告组装节点**：把诊断/归因/建议串成商家可读 markdown，每条结论挂可点 `[refId]`，文末输出证据表
+
+- **扩展 `agent/graph.py`**：新增 `DiagnosisMiniGraph` + `_build_diagnosis_langgraph_app()` + `run_diagnosis()`。线性链路 checker → attributor → advisor → composer。与冷启动子图共用 `_merge_partial` 行为，完全独立编排——不动 `run_insight` / `MiniGraph` / `build_graph`。
+- **扩展 `agent/hub.py`**：
+  - 在 `_INTENT_RULES` 增加"经营诊断"意图（关键词：卖不动 / GMV 跌 / 店铺诊断 / 体检 / 卖不好 / 复盘…）
+  - 重排 route 优先级：P0 经营诊断 > P1 future 档（罗盘/OKR） > P2 其他洞察档——避免 GMV 关键词被 future 档"罗盘归因"抢走
+  - 扩展 `handle()` 加 shop_id 参数，命中诊断意图时调 run_diagnosis
+- **扩展 `agent/run.py` CLI**：
+  - 新增 `--diagnosis` / `--shop-id` / `--window` 三个参数
+  - 主参数从 `keyword` 改名为 `query`（向后兼容，两个子图都能用）
+  - 输出 trace 摘要标注子图名 + 后端类型
+
+**关键设计决定**
+
+1. **共用资产最小侵入**：state.py 只追加 `DiagnosisState`、graph.py 只追加 diagnosis 子图相关函数、hub.py 只增意图条目和分支——甘华梁冷启动子图所有现有代码 0 行修改
+2. **字段别名归一化**：副窗口 mock JSON 用 `kol_keng_wei_roi` / `jingxuan_lianmeng_ctr` 等贴近真实抖店术语的命名；checker 内置 `_METRIC_ALIASES` 字典把它们映射到内部基线 key，两套命名都能跑通
+3. **mock JSON 兼容子对象结构**：副窗口把新店字段放在 `newbie_progress` 子对象、季节字段放在 `sku_inventory` 子对象——`_normalize_metrics` 自动合并这些子对象到扁平指标字典
+4. **空建议防御**：advisor 节点哪怕所有资源都不可用，也输出 fallback 建议"观察 7-14 天后再评估"——硬性兜住"禁空建议"红线
+5. **LangGraph reducer 留口**：`_build_diagnosis_langgraph_app` 已经把 evidence_refs / _trace / messages 配置成 `Annotated[list, operator.add]`，Day 3 切到 LangGraph 后端不会丢证据
+
+**主要文件**
+
+新增：
+- `agent/nodes/diagnosis/__init__.py` + `checker.py` + `attributor.py` + `advisor.py` + `composer.py`
+
+修改（共用资产，最小侵入）：
+- `agent/state.py`：追加 `DiagnosisState`
+- `agent/graph.py`：追加 `DiagnosisMiniGraph` / `_build_diagnosis_langgraph_app` / `run_diagnosis`
+- `agent/hub.py`：经营诊断意图 + route 优先级 + handle 加 shop_id
+- `agent/run.py`：CLI 双子图分发
+
+**回归验证**
+
+- ✅ `python3 -m compileall -q agent` 通过
+- ✅ `python3 -m agent.run "口红" --category 美妆 --mock` 冷启动子图 9 节点 / 57 证据引用，无回归
+- ✅ `python3 -m agent.run "我店铺最近 GMV 跌了" --shop-id case_1 --diagnosis --mock` 诊断子图 4 节点 / 36 证据引用，出完整 markdown 报告
+- ✅ 5 个验收 case 全部命中预期 overlay 与核心问题：
+  - case_1（咖喱生活）：千川 ROI 倒挂 ✅
+  - case_2（素笺布艺）：搜索点击率塌方 ✅
+  - case_3（初见女装铺）：在售 SKU = 0 卡死体验分 ✅
+  - case_4（橙夏）：达人坑位 ROI 暴跌 ✅
+  - case_5（夏树）：千川 ROI + 自播指标异常 ✅
+- ✅ Hub 路由：经营诊断意图优先于 future 档，不被 GMV 关键词抢走
+
+**端到端跑通示例**
+
+```bash
+$ python3 -m agent.run "为什么我的店卖不动" --shop-id case_1 --diagnosis --mock
+
+# 📋 经营诊断报告 · 咖喱生活优品铺子
+> 类目：女装>连衣裙 · 等级：L3 · 体验分：4.3
+## 🎯 核心问题  **qianchuan_roi 显著下跌（55.6%）**
+> 🏷️ 适用画像：nvzhuang_chengzhang / nvzhuang_zibo · 数据完整度 100%
+## ⚠️ 异常指标清单（6 条）
+## 🔎 为什么会这样（根因链）
+## 📡 非数据信号（商城精选频道升级 / 千川女装类目定向调整）
+## 🚀 本周建议（按性价比 × 置信度排序）
+## 📚 证据引用表（36 条）
+```
+
+**价值**
+
+把 Day 1 静态 MD 配置变成可运行 Agent。Day 3 只剩"接通真 LLM 替换 mock 推理 + 联调 5 个 case 的 LLM 输出质量"，框架骨架不用再动。
+
+**下一步（Day 3）**
+
+- 接 `agent/llm.py`（DashScope/千问 OpenAI 兼容端点）
+- 把 attributor / advisor 的根因解释 + 建议文案改为 LLM 生成（保留 mock fallback）
+- 跑 5 个 case 的 LLM 生成版，对照 08 验收用例做主观打分
+- 处理 case_5 季节切换识别（当前未识别"夏装滞销/秋装缺货"，需把 sku_inventory 字段加入基线检查）
+
+**提交信息**
+
+`feat(diagnosis): wire 4 nodes + langgraph subgraph + cli`

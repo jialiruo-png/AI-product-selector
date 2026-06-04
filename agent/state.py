@@ -52,6 +52,52 @@ class InsightState(TypedDict, total=False):
     _trace: list  # list[dict]: {node, ms, note}
 
 
+class DiagnosisState(TypedDict, total=False):
+    """在运营商家诊断子图状态（贾丽婼 - Day 2 加）。
+
+    与 InsightState 完全独立——主子图（甘华梁冷启动选品）状态不动。
+    在 Hub 路由按 diagnosis 意图分发时，run_diagnosis 用这套 state。
+
+    核心字段：
+        - shop_profile：店铺画像（CLI 入参或 mock JSON 加载）
+        - shop_metrics：经营数据快照（7d / prev_7d / 30d）
+        - anomalies：经营诊断专家产出的异常清单
+        - matched_overlays：命中的女装 overlay 列表
+        - root_cause_chains：归因专家产出的根因链
+        - actions：行动建议专家产出的动作清单
+        - report：composer 汇总产出的 markdown 报告
+    """
+
+    # ---- inputs（入参）----
+    shop_id: str           # 店铺 ID，如 "mock_shop_001"
+    user_query: str        # 用户原始问题，如 "我店铺最近 GMV 跌了"
+    window: str            # 诊断窗口，"7d" / "30d"
+
+    # ---- 店铺画像 + 经营数据（Checker 读 mock JSON 后写入）----
+    shop_profile: dict[str, Any]
+    shop_metrics: dict[str, Any]      # {metrics_7d, metrics_prev_7d, metrics_30d}
+
+    # ---- Checker（经营诊断专家）产出 ----
+    diagnosis_summary: str             # 一句话核心问题
+    anomalies: list[dict[str, Any]]    # 异常清单（指标/偏离/严重度/证据）
+    matched_overlays: list[str]        # 命中的女装 overlay 名（如 ["nvzhuang_zibo"]）
+    data_completeness: float           # 0-1 数据完整度
+
+    # ---- Attributor（归因专家）产出 ----
+    root_cause_chains: list[dict[str, Any]]   # 每条异常的根因链
+    non_data_signals: list[dict[str, Any]]    # 规则变动等非数据信号
+
+    # ---- Advisor（行动建议专家）产出 ----
+    actions: list[dict[str, Any]]             # 可执行动作清单（必须挂资源）
+    top_n_for_user: list[int]                 # 推送给用户的 TOP N 动作索引
+
+    # ---- 共享字段（与 InsightState 同名同形）----
+    evidence_refs: list                # 与 InsightState 一致的证据引用列表
+    report: str                        # composer 汇总 markdown
+    messages: list
+    _trace: list
+
+
 # 证据引用计数器（仅用于生成递增 refId，进程内单调）
 _REF_COUNTER = {"n": 0}
 

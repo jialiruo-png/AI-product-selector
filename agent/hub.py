@@ -11,8 +11,15 @@ import re
 from agent.skills.loader import load_skills, skill_chain
 
 # 意图 -> (起始 Skill, 触发关键词)。规则按列表顺序匹配，先命中先生效。
+# 经营诊断意图（贾丽婼）排在最前——明确针对"在运营商家"场景，避免被"诊断"
+# 字眼误路由到甘华梁的"口碑诊断"链。
 _INTENT_RULES: list[tuple[str, str, list[str]]] = [
-    ("口碑诊断", "口碑诊断", ["差评", "口碑", "痛点", "评价", "诊断", "好评"]),
+    ("经营诊断", "经营诊断", [
+        "卖不动", "卖不好", "gmv 跌", "gmv跌", "成交跌", "店铺诊断",
+        "经营诊断", "经营报告", "店铺体检", "为什么没卖好", "为什么跌",
+        "复盘", "我的店", "店铺", "诊断我", "体验分", "退款率",
+    ]),
+    ("口碑诊断", "口碑诊断", ["差评", "口碑", "痛点", "评价", "好评"]),
     ("竞品", "竞品", ["竞品", "对标", "竞争", "对手"]),
     ("爆款策划", "爆款策划", ["爆款", "主图", "卖点", "元素"]),
     ("关键词", "关键词", ["关键词", "词根", "趋势", "需求"]),
@@ -53,17 +60,29 @@ class HubAgent:
     def route(self, query: str) -> dict:
         """规则路由：返回 {intent, skill_chain, entry}。
 
-        非 ● 档（客服/罗盘/OKR...）返回 {status:future, tier, intent}。
+        优先级：经营诊断（贾丽婼）> 其他 ● 洞察档（甘华梁）> ◐/○ 未来档。
+        把"经营诊断"放在最前，避免被 future 档的"罗盘/gmv"关键词抢路由。
         """
         q = (query or "").lower()
 
-        # 先看是否命中 ◐/○ 未来档专家
+        # P0：经营诊断意图优先（贾丽婼诊断子图）
+        for intent, entry, kws in _INTENT_RULES:
+            if intent == "经营诊断" and any(k in q for k in kws):
+                return {
+                    "intent": intent,
+                    "skill_chain": skill_chain(entry, self.skills),
+                    "entry": entry,
+                }
+
+        # P1：◐/○ 未来档专家
         for name, kws in _FUTURE_KEYWORDS:
             if any(k in q for k in kws):
                 return {"intent": name, **_FUTURE_TIERS[name]}
 
-        # ● 洞察档意图匹配
+        # P2：其他 ● 洞察档（甘华梁冷启动子图）
         for intent, entry, kws in _INTENT_RULES:
+            if intent == "经营诊断":
+                continue  # 已在 P0 处理
             if any(k in q for k in kws):
                 return {
                     "intent": intent,
@@ -88,9 +107,33 @@ class HubAgent:
         tokens = [t for t in re.split(r"[\s，,。.!！?？]+", q) if t.strip()]
         return max(tokens, key=len) if tokens else (query or "").strip()
 
-    async def handle(self, query: str) -> dict:
-        """路由后，对 ● 洞察档意图驱动 P0 洞察子图；否则只返回 route 计划。"""
+    async def handle(self, query: str, shop_id: str | None = None) -> dict:
+        """路由后驱动对应子图。
+
+        - 经营诊断意图（贾丽婼）→ run_diagnosis（线性子图，4 节点）
+        - ● 洞察档意图（甘华梁）→ run_insight（4 路并行子图，9 节点）
+        - ◐/○ 未来档：仅返回 route 计划
+        """
         plan = self.route(query)
+
+        # 经营诊断意图：分发到诊断子图
+        if plan.get("intent") == "经营诊断":
+            try:
+                from agent.graph import run_diagnosis  # 延迟导入，缺失不影响 demo
+            except Exception as exc:  # noqa: BLE001
+                return {**plan, "diagnosis": None,
+                        "note": f"run_diagnosis 不可用：{exc}"}
+            try:
+                initial_state = {
+                    "shop_id": shop_id or "case_1",
+                    "user_query": query,
+                    "window": "7d",
+                }
+                final_state = await run_diagnosis(initial_state)
+                return {**plan, "shop_id": initial_state["shop_id"], "diagnosis": final_state}
+            except Exception as exc:  # noqa: BLE001
+                return {**plan, "diagnosis": None,
+                        "note": f"诊断子图执行失败：{exc}"}
 
         if plan.get("status") == "future" or plan.get("intent") not in _INSIGHT_INTENTS:
             return plan
