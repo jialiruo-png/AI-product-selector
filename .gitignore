@@ -22,3 +22,6 @@ venv/
 
 # probe --dump 落盘的原始 JSON
 /tmp/dy_probe_*.json
+
+# 调研参考仓库（不纳入本项目版本管理）
+reference/
