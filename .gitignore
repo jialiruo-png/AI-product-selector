@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -25,3 +26,6 @@ venv/
 
 # 调研参考仓库（不纳入本项目版本管理）
 reference/
+
+# SQLite 数据库（每次跑都会写入）
+采集工作台/outputs/*.db
