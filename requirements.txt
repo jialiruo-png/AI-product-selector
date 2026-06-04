@@ -2,3 +2,6 @@
 # openai SDK 用于 analyze.py 调千问（DashScope OpenAI 兼容端点）；
 # 若要切 DeepSeek / 智谱 / Kimi 等 OpenAI 兼容协议厂商，只改 .env 的 LLM_BASE_URL，无需换包。
 openai>=1.50.0
+
+# demo/streamlit_app.py 用（副窗口任务 B）；仅演示界面用，不影响 agent 主链路和 MiniGraph 兜底。
+streamlit>=1.36.0
