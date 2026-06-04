@@ -216,3 +216,162 @@ fix(wiki): handle missing category_baseline.md gracefully
 - **大决策**（换框架、改路由协议）：所有人对齐后再动
 
 **最高原则**：**不破坏对方的工作，不重复造轮子，所有变更可审计**。
+
+---
+
+## 11. 多 Claude Code 窗口并行开发协议
+
+> 当贾丽婼开两个 Claude Code 窗口同时推进诊断子图开发时遵守。
+
+### 11.1 主窗口 vs 副窗口分工
+
+| 窗口 | 负责范围 | 触碰的文件 |
+|---|---|---|
+| **主窗口** | 核心代码主链路（Day 2/3 主体） | `agent/nodes/diagnosis/*`、`agent/state.py`、`agent/graph.py`、`agent/hub.py` |
+| **副窗口** | 独立资产（数据 + UI + 文档） | `agent/mocks/shops/*.json`、`demo/streamlit_app.py`、`09-演示话术.md` |
+
+### 11.2 严禁同时触碰的文件（冲突高危）
+
+副窗口绝对不要碰：
+- `agent/state.py`（主窗口在 Day 2 扩展字段）
+- `agent/graph.py`（主窗口在 Day 2 编排子图）
+- `agent/hub.py`（主窗口在 Day 2 加路由）
+- `agent/nodes/diagnosis/*.py`（主窗口在 Day 2-3 开发）
+- `agent/llm.py`（主窗口在 Day 3 接通 LLM）
+
+主窗口绝对不要碰：
+- `agent/mocks/shops/*.json`（副窗口在做）
+- `demo/streamlit_app.py`（副窗口在做）
+- `09-演示话术.md`（副窗口在做）
+
+### 11.3 副窗口任务清单（按顺序做）
+
+#### 任务 A：5 份 mock 商家 JSON（最高优先级）
+
+**目的**：让 Day 3 跑 5 个 case 时有数据可吃。
+**路径**：`agent/mocks/shops/case_{1..5}.json`
+**字段约定**（按抖店罗盘真实字段结构还原）：
+
+```json
+{
+  "_mock": true,
+  "_case_id": "case_1",
+  "_case_name": "咖喱生活",
+  "shop_profile": {
+    "shop_id": "mock_shop_001",
+    "shop_name": "咖喱生活优品铺子",
+    "category": "女装>连衣裙",
+    "entry_days": 142,
+    "shop_level": "L3",
+    "exp_score": 4.3,
+    "monthly_gmv": 870000,
+    "dau_gmv_share": {
+      "live": 0.65,
+      "video": 0.15,
+      "search": 0.12,
+      "mall": 0.08
+    }
+  },
+  "metrics_7d": {
+    "gmv": 120000,
+    "uv": 82000,
+    "cvr": 0.013,
+    "aov": 113,
+    "live_room_stay_sec": 22,
+    "fanzhuan_rate": 0.014,
+    "uv_value": 4.8,
+    "main_image_ctr": 0.051,
+    "qianchuan_roi": 0.8,
+    "refund_rate": 0.082
+  },
+  "metrics_prev_7d": { /* 上 7 天对照 */ },
+  "metrics_30d": { /* 近 30 天 */ },
+  "traffic_breakdown": { /* 渠道拆分 */ },
+  "sku_performance": [ /* SKU 列表 */ ],
+  "fulfillment_metrics": { /* 履约 */ },
+  "newbie_progress": null /* 仅新店 case 3 用 */
+}
+```
+
+**5 个 case 对应**：
+- case_1.json：咖喱生活（女装自播 + 成长期）
+- case_2.json：素笺布艺（女装货架店）
+- case_3.json：初见女装铺（女装新店冷启动）—— `newbie_progress` 必须非 null
+- case_4.json：橙夏（女装达播店）—— 含 `kol_metrics` 字段
+- case_5.json：夏树（女装自播 + 季节切换）—— 含 `sku_inventory` 字段
+
+**数据来源**：`08-验收用例-女装真实场景.md` 里每个 case 的"经营数据"表，直接照搬填到 JSON。
+
+**验收**：5 份 JSON 能被 `json.load()` 解析，且字段覆盖 06 PRD §6.3 提到的所有节点输入需求。
+
+---
+
+#### 任务 B：Streamlit demo 框架（中优先级）
+
+**目的**：面试演示用，把 CLI 输出包装成可视化界面。
+**路径**：`demo/streamlit_app.py`（新目录 `demo/`）
+**MVP 范围**：
+
+```python
+import streamlit as st
+import json
+from pathlib import Path
+
+st.set_page_config(page_title="抖店中小商家经营诊断 Agent", layout="wide")
+
+# 左侧栏：选择 case
+case_files = sorted(Path("agent/mocks/shops").glob("case_*.json"))
+case = st.sidebar.selectbox("选择诊断 case", case_files, format_func=lambda p: p.stem)
+
+# 主区：三段式展示
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.subheader("商家画像")
+    data = json.loads(case.read_text())
+    st.json(data["shop_profile"])
+
+with col2:
+    st.subheader("AI 诊断报告")
+    if st.button("跑一次诊断"):
+        # 暂用占位，等 Day 3 接 agent.run
+        st.markdown("**核心问题**：[占位] 等 Day 3 接 agent.run")
+        st.info("Day 3 后会接通真实 Agent 调用")
+```
+
+**Day 4 收尾时**：把占位换成真实 `from agent.run import run; result = run(case_id, mock=True)`。
+
+**新增依赖**：`streamlit` 必入 `requirements.txt`。
+
+---
+
+#### 任务 C：09-演示话术.md（低优先级，可选）
+
+**目的**：面试时按这个稿子讲，2-3 分钟内把诊断 Agent 价值讲清楚。
+**路径**：`/Users/damowang/Desktop/AI-product-selector/09-演示话术.md`
+**结构**：
+1. 开场（30 秒）：90% 中小商家拿不到小二
+2. 现状（30 秒）：抖店 AI 4 大短板
+3. 方案（60 秒）：经营诊断子图 + 女装 6 个 overlay
+4. 演示（90 秒）：跑 case 1 咖喱生活 → 展示诊断 + 归因 + 建议
+5. Q&A 预演（30 秒）：3 个常被追问的问题及答案
+
+参考资料：`06-PRD.md` §14、`08-验收用例.md` Case 1。
+
+---
+
+### 11.4 协调机制
+
+1. **commit 顺序**：副窗口先 commit 它的独立文件；主窗口在做完一个原子节点（如 checker.py）就 commit，避免大批量改动堆积
+2. **每次 commit 后跑** `python3 -m compileall -q agent` + `python3 -m agent.run "口红" --category 美妆 --mock`，确保没回归
+3. **如果副窗口任务做完想往前抢**：先跟主窗口（或主窗口 commit log）确认 Day 2 已合入，再去做 Day 3 的子任务
+4. **不许 push 到远程**：所有 commit 都本地 `运营` 分支，等 V1 完整跑通后由贾丽婼统一 push
+
+### 11.5 副窗口可读但不可改的文档
+
+读完这些再开干（避免和主窗口认知不一致）：
+- `06-在运营商家诊断Agent-PRD.md`（产品方案主文档）
+- `07-女装诊断Skill写作规范.md`（Skill 写作约束）
+- `08-验收用例-女装真实场景.md`（5 个 case 的期望输出，做 mock 时直接照搬数据）
+- `agent/skills/category_overlays/*.md`（女装 6 个 overlay，了解每个 case 应该命中哪个）
+- `CLAUDE.md`（本文件第 11 章必读）
