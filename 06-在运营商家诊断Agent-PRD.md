@@ -171,24 +171,40 @@
 
 ### 5.4 Skill MD 设计原则（关键差异化）
 
-#### 5.4.1 类目 × 模式矩阵化（解决"同质化"短板）
+#### 5.4.1 V1 聚焦女装类目（解决"同质化"短板）
 
-每个专家 Skill MD 不是一个 prompt，而是**类目 × 店铺模式** 的二维矩阵：
+**为什么 V1 只做女装**：
+- 抖音电商女装是 GMV 第一大类目，故事/数据/演示素材都最丰富
+- 数据样本最大，类目基线 / 活动数据库 / 规则变动 Wiki 喂得最饱
+- 3-4 天工期做深 > 跨类目做浅
+- 体验抖店时拿到的真实截图（咖喱生活·法式碎花红裙）正好是女装，演示有真实锚点
+- V2 验证有效后再批量扩到食品 / 家居 / 美妆
+
+**通用 SOP + 女装细分场景 overlay 的二维结构**：
 
 ```
-agent/skills/jingying_zhenduan.md             # 通用入口 SOP
+agent/skills/jingying_zhenduan.md             # 通用入口 SOP（所有类目通用框架）
 agent/skills/guiyin.md                         # 通用归因框架
 agent/skills/xingdong_jianyi.md                # 通用建议生成 SOP
 
 agent/skills/category_overlays/
-  ├── nvzhuang_zibo.md        # 女装·自播店 SOP（强短视频+主图）
-  ├── nvzhuang_huojia.md      # 女装·货架店 SOP（强搜索+评价）
-  ├── shipin_zibo.md          # 食品·自播店 SOP（强信任+复购）
-  ├── jiaju_dabo.md           # 家居·达播店 SOP（强达人+客单价）
-  └── ...                     # V1 先做 6 个高频组合，后续扩
+  ├── nvzhuang_zibo.md            # 女装·自播店（白牌/工厂店）
+  │                                  → 直播间为主流量，价格敏感，强短视频+主图
+  ├── nvzhuang_dabo.md            # 女装·达播店（品牌/精品）
+  │                                  → 靠达人带货，客单中高，强达人选品/坑位
+  ├── nvzhuang_huojia.md          # 女装·货架店（搜索+商城）
+  │                                  → 长尾搜索为主，强 SEO/标题/评价
+  ├── nvzhuang_xindian.md         # 女装·新店冷启动期（入驻 0-90 天）
+  │                                  → 体验分 0，依赖平台扶持，强冷启动 SOP
+  ├── nvzhuang_chengzhang.md      # 女装·成长期（GMV 30w-300w/月）
+  │                                  → 有数据但增长卡壳，强归因 + 千川+商城打通
+  └── nvzhuang_jijie.md           # 女装·季节切换期（夏装/秋装/换季敏感）
+                                     → 库存 + 应季款风险高，强备货 + 趋势预判
 ```
 
-Loader 加载时**通用 SOP + 类目 overlay 合并**，前者定框架后者改细节。
+Loader 加载时**通用 SOP + 女装 overlay 合并**，前者定框架后者改细节。
+
+**店铺自动归属逻辑**：根据商家入驻信息 + 经营数据自动判断属于哪个 overlay（例：直播 GMV 占比 >60% → 自播店；入驻 <90 天 → 新店冷启动期）。一家店可同时归属多个 overlay（如自播店+成长期），优先级靠加权。
 
 #### 5.4.2 资源配套数据库（解决"缺资源"短板）
 
@@ -246,11 +262,13 @@ agent/
     jingying_zhenduan.md       # 经营诊断专家 SOP
     guiyin.md                  # 归因专家 SOP
     xingdong_jianyi.md         # 行动建议专家 SOP
-    category_overlays/         # 类目 × 模式 overlay 矩阵
-      nvzhuang_zibo.md
-      nvzhuang_huojia.md
-      shipin_zibo.md
-      ...(共 6 个 V1 范围)
+    category_overlays/         # V1 全量聚焦女装 6 个细分场景
+      nvzhuang_zibo.md           # 自播店
+      nvzhuang_dabo.md           # 达播店
+      nvzhuang_huojia.md         # 货架店
+      nvzhuang_xindian.md        # 新店冷启动期
+      nvzhuang_chengzhang.md     # 成长期
+      nvzhuang_jijie.md          # 季节切换期
   wiki/
     industry/
       activity_db.md           # 活动数据库
@@ -383,7 +401,7 @@ agent/
 
 **Do（V1 必做）**：
 - 经营诊断 / 归因 / 行动建议 3 个专家 Skill MD 落地
-- 6 个类目 × 模式 overlay（女装自播/女装货架/食品自播/食品货架/家居达播/家居货架）
+- **6 个女装细分场景 overlay**（自播 / 达播 / 货架 / 新店冷启动 / 成长期 / 季节切换期）
 - 4 个诊断节点（Checker / Attributor / Advisor / Composer）落地 LangGraph 子图
 - activity_db / tool_db / rule_changes / category_baseline 4 份 Wiki 种子
 - 与甘华梁 Hub 路由对接
@@ -403,7 +421,8 @@ agent/
 
 | 风险 | 缓解 |
 |---|---|
-| 类目 overlay 颗粒度不够 → 诊断仍同质化 | V1 先做 6 个高频组合验证有效性，再批量扩 |
+| 类目 overlay 颗粒度不够 → 诊断仍同质化 | V1 聚焦女装 6 个细分场景做深验证，再批量扩到其他类目 |
+| 单一类目覆盖商家数有限 | 女装是抖音电商 GMV 第一大类目，V1 覆盖盘子已足够大；V2 优先扩到食品、家居 |
 | 活动数据库需要持续维护 | 行业 Wiki 接管，运营同学按周更 MD；版本化追踪 |
 | 错误建议导致商家亏损 | 高敏感动作（改价）走二次确认；建议附"参考依据"+"风险提示"双段 |
 | Token 成本失控 | 节点级预算守门（沿用甘华梁 `max_cost_calls` 模式）；分档调用（参考 Soul 缘分档案分档 LLM 经验） |
