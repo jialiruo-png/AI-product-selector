@@ -28,6 +28,39 @@ def _orig(p: dict) -> dict:
     return p if isinstance(p, dict) else {}
 
 
+def _pick(p: dict, *keys, default=None):
+    """从商品多层视图里取第一个非空值。
+
+    取值优先级：rank 后的顶层扁平值（如真实数据的 price/sold/rating，rank 已算好）
+    → raw 视图里的同名值（mock 数据扁平值在此）。两级覆盖 mock 与真实两种形态。
+    """
+    if not isinstance(p, dict):
+        return default
+    for k in keys:
+        v = p.get(k)
+        if v not in (None, "", 0, 0.0):
+            return v
+    o = _orig(p)
+    if o is not p:
+        for k in keys:
+            v = o.get(k)
+            if v not in (None, "", 0, 0.0):
+                return v
+    return default
+
+
+def _sold_nested(p: dict):
+    """真实数据销量在 raw.sold_info.sold_count，做兜底取值。"""
+    si = _orig(p).get("sold_info") or {}
+    return si.get("sold_count") if isinstance(si, dict) else None
+
+
+def _rating_nested(p: dict):
+    """真实数据评分在 raw.rate_info.score，做兜底取值。"""
+    ri = _orig(p).get("rate_info") or {}
+    return ri.get("score") if isinstance(ri, dict) else None
+
+
 # --------------------------------------------------------------------------- #
 # Step2 社媒人群
 # --------------------------------------------------------------------------- #
@@ -62,8 +95,14 @@ class SocialAnalyzer(BaseNode):
 # Step3 价格带
 # --------------------------------------------------------------------------- #
 def _safe_price(p: dict) -> float:
+    # 顶层 price（rank 真实数据已算好）优先，回退 raw；
+    # 再回退真实嵌套字段 product_price_info.sale_price_decimal。
+    val = _pick(p, "price")
+    if val is None:
+        ppi = _orig(p).get("product_price_info") or {}
+        val = ppi.get("sale_price_decimal") or ppi.get("single_product_price_decimal")
     try:
-        return float(_orig(p).get("price") or 0)
+        return float(val or 0)
     except (TypeError, ValueError):
         return 0.0
 
@@ -151,7 +190,8 @@ class PriceAnalyzer(BaseNode):
 # Step4 爆款 + 主图
 # --------------------------------------------------------------------------- #
 def _first_image(p: dict) -> str:
-    img = _orig(p).get("image") or {}
+    # image 是嵌套结构，真实数据在 raw.image.url_list
+    img = _orig(p).get("image") or p.get("image") or {}
     url_list = img.get("url_list") if isinstance(img, dict) else None
     if url_list:
         return url_list[0]
@@ -180,13 +220,12 @@ class HotItemAnalyzer(BaseNode):
         hot_items: list[dict] = []
         refs = []
         for p in products[:3]:
-            o = _orig(p)
             item = {
-                "product_id": o.get("product_id"),
-                "title": o.get("title"),
+                "product_id": _pick(p, "product_id"),
+                "title": _pick(p, "title"),
                 "image": _first_image(p),
                 "price": _safe_price(p),
-                "sold": o.get("sold"),
+                "sold": _pick(p, "sold", default=_sold_nested(p)),
                 "elements": ["颜色", "材质"],  # TODO: wire real 主图视觉解析
             }
             hot_items.append(item)
@@ -238,15 +277,15 @@ class CompetitorAnalyzer(BaseNode):
             seller = o.get("seller_info") or {}
             brand = o.get("brand_info") or {}
             competitors.append({
-                "product_id": o.get("product_id"),
-                "title": o.get("title"),
+                "product_id": _pick(p, "product_id"),
+                "title": _pick(p, "title"),
                 # 兼容 rank 拍平后的 shop/brand
-                "shop_name": seller.get("shop_name") or p.get("shop"),
-                "brand_name": brand.get("brand_name") or p.get("brand"),
+                "shop_name": p.get("shop") or seller.get("shop_name"),
+                "brand_name": p.get("brand") or brand.get("brand_name"),
                 "price": _safe_price(p),
-                "sold": o.get("sold"),
-                "rating": o.get("rating"),
-                "review_count": o.get("review_count"),
+                "sold": _pick(p, "sold", default=_sold_nested(p)),
+                "rating": _pick(p, "rating", default=_rating_nested(p)),
+                "review_count": _pick(p, "review_count"),
             })
 
         # 对 Top1~2 拉评论并做情感/痛点分析

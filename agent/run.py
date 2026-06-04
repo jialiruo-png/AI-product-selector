@@ -62,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     print(report)
 
     # ---- trace 摘要 ----
-    backend = type(build_graph()).__name__
+    app = build_graph()
+    backend = getattr(app, "backend", type(app).__name__)
     trace = final_state.get("_trace") or []
     nodes_run = [t.get("node") for t in trace if isinstance(t, dict)]
     refs = final_state.get("evidence_refs") or []

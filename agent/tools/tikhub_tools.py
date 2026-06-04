@@ -203,6 +203,7 @@ class AnalyzeReviewsTool(BaseTool):
                 ],
             }
 
+        _load_client()  # 确保项目根 .env 已加载（DASHSCOPE_API_KEY / LLM_*）
         import analyze  # 需要 DASHSCOPE_API_KEY；惰性 import
         try:
             result = analyze.analyze_reviews(reviews or [])
