@@ -17,6 +17,7 @@ from pathlib import Path
 from agent.evidence import make_ref
 
 from ..base import BaseNode, is_mock
+from ._labels import metric_zh
 
 # mock 商家数据目录
 _MOCK_DIR = Path(__file__).resolve().parents[2] / "mocks" / "shops"
@@ -240,14 +241,26 @@ def _detect_anomalies(
 
 
 def _summary_for(anomalies: list[dict], overlays: list[str]) -> str:
-    """生成一句话核心问题（≤ 30 字）。"""
+    """生成一句话核心问题，商家可读，不做粗暴字符截断。"""
     if not anomalies:
         return "店铺核心指标健康，未发现显著异常"
     top = anomalies[0]
-    metric = top["metric"]
-    direction = "下跌" if top["deviation_vs_baseline_pct"] < 0 else "异常"
-    overlay_hint = overlays[0].replace("nvzhuang_", "") if overlays else ""
-    return f"{metric} 显著{direction}（{abs(top['deviation_vs_baseline_pct'])}%）"[:30]
+    metric_name = metric_zh(top["metric"])
+    dev = top["deviation_vs_baseline_pct"]
+    current = top.get("current")
+
+    # 特殊场景 1：值为 0 且是"应当≥1"类目（在售商品、应季 SKU）→ 直白说"为 0/严重不足"
+    if current == 0 and top["metric"] in {"in_sale_sku", "season_sku_count"}:
+        return f"{metric_name}为 0，需立即补齐"
+    if isinstance(current, (int, float)) and current > 0 and top["metric"] == "season_sku_count":
+        return f"{metric_name}仅 {int(current)} 个，远低于类目均值（{int(top['baseline'])}）"
+
+    # 方向词：滞销/退款等"越低越好"类指标偏正向 = 异常变高
+    if top["metric"] in {"refund_rate", "stale_inventory_pct"}:
+        direction = "超标" if dev > 0 else "异常"
+    else:
+        direction = "下跌" if dev < 0 else "异常上涨" if dev > 0 else "偏离"
+    return f"{metric_name}显著{direction}（{abs(dev):.1f}%）"
 
 
 class Checker(BaseNode):

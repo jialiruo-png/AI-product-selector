@@ -779,3 +779,109 @@ X+5 视觉中性化之后，几个问题：(1) 按钮深底白字被 Streamlit 1
 **提交信息**
 
 `refactor(demo): translate fields, strip ev tags, surface wiki refs`
+
+---
+
+## 批次 10 · 主窗口 · Day 4：报告中文化 + LLM warning 静默 + 文案精修（贾丽婼）
+
+> 更新日期：2026-06-05
+> 负责人：贾丽婼（Liruo） · 主窗口
+> 分支：`运营`
+> 状态：Day 4 完成，V1 全链路收口可演示
+
+**功能说明**
+
+Day 4 收尾——把"能跑"升级为"能演示"。3 类小修，全部内嵌到诊断子图内部节点，零接口改动。
+
+- **新增 `agent/nodes/diagnosis/_labels.py`**：指标英文 key → 中文标签字典（29 个常用指标）
+  - `metric_zh("qianchuan_roi")` → "千川投产比"
+  - `metric_zh("stale_inventory_pct")` → "滞销库存占比"
+  - 未登记字段原样返回，避免误翻译
+  - 副窗口现在自己维护了一份临时 demo 端 _labels，等主窗口 commit 后副窗口可切到 `from agent.nodes.diagnosis._labels import metric_zh` 复用（§11.2 私有 API 约定）
+
+- **报告文案全链路中文化**：
+  - `checker._summary_for`：核心问题文案翻译为中文 + 特殊场景兜底
+    - 修复粗暴的 `[:30]` 截断（之前 case_5 出 "stale_inventory_pct 显著异常（153.3" 被切掉 %）
+    - 滞销/退款类"越低越好"指标用"超标"代替"下跌"
+    - case_3 特殊：在售商品 = 0 时显示"在售商品数为 0，需立即补齐"而非生硬的"下跌 100%"
+    - case_5 季节：应季 SKU 数 8 时显示"仅 8 个，远低于类目均值（30）"
+  - `composer._format_anomaly_line`：异常清单 metric → 中文
+  - `composer._format_root_cause`：根因章节标题 → 中文
+  - `attributor._root_cause_text`：fallback 文案（LLM 失败时兜底）从 "X 实际 Y vs 基线 Z" → "X（Y）显著偏离类目基线（Z）"
+  - `attributor._coupled_text`：跨场景耦合描述也走中文
+
+- **LLM warning 降级静默**：
+  - `agent/llm.py` 把 `logger.warning` 全部改为 `logger.debug`
+  - 之前 LLM 失败时会输出 "chat_json 调用失败：Connection error" 到 stderr，污染 CLI 报告输出
+  - 降级后 fallback 静默生效
+
+- **跑通副窗口 Streamlit demo 验证**：
+  - `demo/streamlit_app.py` 已接通 `agent.graph.run_diagnosis`（mock 模式）
+  - 后端可达，报告长度 5069 字符，4 节点全执行
+  - 启动命令：`pip install -r requirements.txt && streamlit run demo/streamlit_app.py`
+  - **注意**：demo 默认强制 `AGENT_MOCK=1`（不调 LLM），演示如想看 LLM 增强需 `unset AGENT_MOCK` 后再启动
+
+**主观打分 5 case（基于 08 期望对照）**
+
+| Case | 核心问题文案 | 期望 | 评分 |
+|---|---|---|---|
+| 1 咖喱生活 | 千川投产比显著下跌（55.6%） | 千川 ROI 倒挂 | ✅ A |
+| 2 素笺布艺 | 搜索点击率显著下跌（23.6%） | 搜索流量塌方 | ✅ A |
+| 3 初见女装铺 | 在售商品数为 0，需立即补齐 | 突破 0 分卡住 | ✅ A |
+| 4 橙夏 | 达人坑位 ROI 显著下跌（45.0%） | 达人选品命中率低 | ✅ A |
+| 5 夏树 | 滞销库存占比显著超标（153.3%） | 滞销+应季缺货 | ✅ A+ |
+
+LLM 开篇摘要质量（case_5 实测）：
+> 你的店本周滞销库存占比超了正常水平一倍多，根子上是夏季旧款积压太重、应季秋款又只上了零星几件，导致顾客进来没得挑。眼下最值得做的就是把那些卖不动的老款直接改成 9.9 引流款快速清仓，同时拿出女装连衣裙的千川投流模板，把广告预算往秋装上倾斜...
+
+接近"老板/小二真人会说的话"的语气，达到 V1 演示线。
+
+**主要文件**
+
+新增：
+- `agent/nodes/diagnosis/_labels.py`（指标中英映射）
+
+修改（全部诊断子图内部，零接口改动）：
+- `agent/nodes/diagnosis/checker.py`：导入 metric_zh + 改 _summary_for
+- `agent/nodes/diagnosis/composer.py`：导入 metric_zh + 改 anomaly/root_cause 渲染
+- `agent/nodes/diagnosis/attributor.py`：导入 metric_zh + 改 fallback 文案
+- `agent/llm.py`：warning → debug
+
+**回归验证**
+
+- ✅ `python3 -m compileall -q agent` 通过
+- ✅ `python3 -m agent.run "口红" --category 美妆 --mock` 冷启动子图 9 节点 / 57 证据引用，无回归
+- ✅ 5 个 case LLM 模式全部端到端跑通，核心问题文案符合商家阅读习惯
+- ✅ 副窗口 demo 后端可达
+- ✅ stderr 不再泄漏 LLM 失败信息到报告输出
+
+**V1 全链路就绪状态**
+
+| 模块 | 状态 |
+|---|---|
+| Day 1 Skill MD + Wiki 种子 | ✅ 13 个 MD |
+| Day 2 4 节点 + LangGraph 子图 + Hub 路由 + CLI | ✅ |
+| Day 3 LLM 接入 + 3 处增强 + 季节识别 | ✅ |
+| Day 4 报告中文化 + 文案精修 + warning 静默 | ✅ |
+| 5 case mock JSON（副窗口） | ✅ |
+| Streamlit demo（副窗口） | ✅ |
+| 09-演示话术稿（副窗口） | ✅ |
+
+**演示就绪**
+
+```bash
+# 端到端 CLI 演示（带 LLM 增强）
+python3 -m agent.run "我店铺最近 GMV 跌了" --shop-id case_1 --diagnosis
+python3 -m agent.run "诊断" --shop-id case_5 --diagnosis  # 季节切换最有戏剧效果
+
+# 可视化 demo 启动（mock 模式）
+pip install -r requirements.txt
+streamlit run demo/streamlit_app.py
+
+# 想看 LLM 增强版 demo：
+unset AGENT_MOCK && streamlit run demo/streamlit_app.py
+```
+
+**提交信息**
+
+`feat(diagnosis): chinese labels + llm warning mute + summary polish`

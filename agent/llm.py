@@ -156,7 +156,7 @@ def chat_json(
             })
         return out
     except Exception as exc:  # noqa: BLE001 — LLM 失败不许影响主链路
-        logger.warning("chat_json 调用失败，走 fallback：%s", exc)
+        logger.debug("chat_json 调用失败，走 fallback：%s", exc)
         return {**fallback, "_llm_error": str(exc)[:200]}
 
 
@@ -188,7 +188,7 @@ def chat_text(
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("chat_text 调用失败，走 fallback：%s", exc)
+        logger.debug("chat_text 调用失败，走 fallback：%s", exc)
         return mock_fallback
 
 

@@ -15,6 +15,7 @@ from agent.evidence import make_ref
 from agent.llm import chat_json, has_llm
 
 from ..base import BaseNode
+from ._labels import metric_zh
 
 # 维度映射：指标名 -> 主维度（用于 MECE 拆解）
 _METRIC_DIMENSION = {
@@ -85,8 +86,13 @@ _RULE_CHANGES = [
 
 
 def _root_cause_text(metric: str, current, baseline) -> str:
-    """构造根因描述文本。"""
-    return f"{metric} 实际 {current} vs 基线 {baseline}，显著偏离"
+    """构造根因描述文本（兜底/fallback 文案，LLM 增强时会被覆盖）。"""
+    return f"{metric_zh(metric)}（{current}）显著偏离类目基线（{baseline}）"
+
+
+def _coupled_text(coupled_metric: str, current_value) -> str:
+    """构造跨场景耦合证据文本。"""
+    return f"{metric_zh(coupled_metric)}同期异动（{current_value}），存在相关性"
 
 
 def _build_candidates(
@@ -127,16 +133,16 @@ def _build_candidates(
         cv_ref = make_ref(
             layer="raw",
             source_id=f"shop_metrics_{coupled_metric}",
-            summary=f"耦合指标 {coupled_metric} 当前 {cv_current}",
+            summary=_coupled_text(coupled_metric, cv_current),
             confidence=0.75,
         )
         refs.append(cv_ref)
         candidates.append({
-            "root_cause": f"耦合指标 {coupled_metric} 同期异动（{cv_current}），与 {metric} 异常强相关",
+            "root_cause": _coupled_text(coupled_metric, cv_current),
             "dimension": _METRIC_DIMENSION.get(coupled_metric, primary_dim),
             "confidence": 0.75,
             "evidence_refs": [cv_ref["refId"]],
-            "cross_validation": f"与主因 {metric} 时间共变",
+            "cross_validation": f"与主因「{metric_zh(metric)}」时间共变",
         })
 
     return candidates, refs

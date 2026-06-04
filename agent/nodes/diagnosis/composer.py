@@ -9,10 +9,11 @@ from __future__ import annotations
 from agent.llm import chat_text, has_llm
 
 from ..base import BaseNode
+from ._labels import metric_zh
 
 
 def _format_anomaly_line(anomaly: dict) -> str:
-    metric = anomaly["metric"]
+    metric_name = metric_zh(anomaly["metric"])
     cur = anomaly["current"]
     baseline = anomaly["baseline"]
     dev_baseline = anomaly["deviation_vs_baseline_pct"]
@@ -20,17 +21,18 @@ def _format_anomaly_line(anomaly: dict) -> str:
     refs = anomaly.get("evidence_refs") or []
     refs_inline = " ".join(f"[{r}]" for r in refs[:2])
     sev_tag = "🔴" if severity == "high" else "🟡"
-    return f"- {sev_tag} **{metric}** 当前 {cur} / 基线 {baseline} / 偏离 {dev_baseline}% {refs_inline}"
+    return f"- {sev_tag} **{metric_name}** 当前 {cur} / 基线 {baseline} / 偏离 {dev_baseline}% {refs_inline}"
 
 
 def _format_root_cause(chain: dict) -> str:
     metric = chain.get("anomaly_metric", "")
+    metric_name = metric_zh(metric)
     candidates = chain.get("candidates") or []
     primary_idx = chain.get("primary_root_cause_index", 0)
     if not candidates:
-        return f"- **{metric}**：暂无足够数据归因\n"
+        return f"- **{metric_name}**：暂无足够数据归因\n"
 
-    lines = [f"### 异常指标：{metric}"]
+    lines = [f"### 异常指标：{metric_name}"]
     for i, c in enumerate(candidates):
         marker = "🎯" if i == primary_idx else "  "
         conf = c.get("confidence", 0)
