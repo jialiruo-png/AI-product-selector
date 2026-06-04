@@ -4,7 +4,7 @@
     streamlit run demo/streamlit_app.py
 
 后端：实时调用 agent.graph.run_diagnosis，mock 模式。
-设计：中性配色、Altair 图表、去 emoji 装饰、隐藏 Streamlit chrome。
+设计：中性配色、中文术语、Altair 图表、去 emoji / 去工程标签。
 """
 
 import os
@@ -33,7 +33,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- 全局样式 ----------
+# ============================================================
+#                       全局样式
+# ============================================================
 st.markdown(
     """
 <style>
@@ -45,32 +47,52 @@ html, body, button, input, select, textarea, [class*="st-"] {
 
 .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1380px; }
 
-h1 { font-size: 1.55rem; font-weight: 600; letter-spacing: -0.01em; color: #1a1a1a; margin-bottom: 0.2rem; }
-h2 { font-size: 1.15rem; font-weight: 600; color: #2a2a2a; margin-top: 1.6rem; margin-bottom: 0.6rem; }
-h3 { font-size: 0.98rem; font-weight: 600; color: #3a3a3a; margin-top: 1.2rem; }
-h4 { font-size: 0.9rem;  font-weight: 600; color: #4a4a4a; }
+h1 { font-size: 1.55rem; font-weight: 600; letter-spacing: -0.01em; color: #1a1a1a; margin: 0 0 0.2rem 0; }
+h2 { font-size: 1.15rem; font-weight: 600; color: #2a2a2a; margin: 1.6rem 0 0.6rem 0; }
+h3 { font-size: 0.98rem; font-weight: 600; color: #3a3a3a; margin: 1.2rem 0 0.4rem 0; }
+h4 { font-size: 0.9rem;  font-weight: 600; color: #4a4a4a; margin: 0.8rem 0 0.3rem 0; }
 
 p, li { color: #333; }
 
+/* ---------- 按钮：白底黑字描边，hover 反色 ---------- */
 .stButton > button {
-    background-color: #1f1f1f;
-    color: #fff;
-    border: 1px solid #1f1f1f;
+    background-color: #ffffff !important;
+    color: #1a1a1a !important;
+    border: 1px solid #1a1a1a !important;
     border-radius: 4px;
     font-weight: 500;
     padding: 0.45rem 1.4rem;
-    transition: background-color 0.15s ease;
+    transition: all 0.15s ease;
 }
-.stButton > button:hover { background-color: #3a3a3a; border-color: #3a3a3a; color: #fff; }
-.stButton > button:focus, .stButton > button:active { box-shadow: none !important; outline: none !important; }
+.stButton > button:hover {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border-color: #1a1a1a !important;
+}
+.stButton > button:focus, .stButton > button:active {
+    box-shadow: none !important;
+    outline: none !important;
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+}
+.stButton > button p, .stButton > button span, .stButton > button div {
+    color: inherit !important;
+    margin: 0;
+}
 
+/* ---------- expander ---------- */
 [data-testid="stExpander"] details {
     border: 1px solid #ececec;
     border-radius: 4px;
     background: #fdfdfd;
 }
-[data-testid="stExpander"] summary { font-weight: 500; color: #333; padding: 0.55rem 1rem; }
+[data-testid="stExpander"] summary {
+    font-weight: 500;
+    color: #333;
+    padding: 0.55rem 1rem;
+}
 
+/* ---------- blockquote 改左边竖线，不用色块 ---------- */
 blockquote {
     border-left: 3px solid #d4d4d4;
     color: #555;
@@ -79,21 +101,36 @@ blockquote {
     background: transparent;
 }
 
+/* ---------- 自定义 metric 卡片：等高、纯灰白 ---------- */
 .metric-card {
     border: 1px solid #e8e8e8;
     border-radius: 4px;
     padding: 0.85rem 1rem;
     background: #fff;
-    height: 100%;
+    min-height: 92px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }
 .metric-card .label {
-    font-size: 0.72rem; color: #888; text-transform: uppercase;
-    letter-spacing: 0.06em; margin-bottom: 0.35rem;
+    font-size: 0.72rem;
+    color: #888;
+    letter-spacing: 0.02em;
+    margin-bottom: 0.35rem;
 }
 .metric-card .value {
-    font-size: 1.35rem; font-weight: 600; color: #1a1a1a; line-height: 1.2;
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    line-height: 1.2;
+}
+.metric-card .sub {
+    font-size: 0.78rem;
+    color: #888;
+    margin-top: 0.25rem;
 }
 
+/* ---------- 通用引用 / 信号卡 ---------- */
 .signal-card {
     border-left: 3px solid #999;
     padding: 0.6rem 0.95rem;
@@ -103,10 +140,33 @@ blockquote {
     color: #333;
     border-radius: 0 4px 4px 0;
 }
-.signal-card .signal-meta { color: #888; font-size: 0.8rem; margin-top: 0.25rem; }
+.signal-card .signal-meta {
+    color: #888;
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+}
+
+.wiki-item {
+    border: 1px solid #ececec;
+    border-radius: 4px;
+    padding: 0.55rem 0.9rem;
+    background: #fcfcfc;
+    margin: 0.35rem 0;
+    font-size: 0.88rem;
+    color: #333;
+}
+.wiki-item .wiki-tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    color: #666;
+    background: #f0f0f0;
+    padding: 0.05rem 0.5rem;
+    border-radius: 2px;
+    margin-right: 0.5rem;
+}
 
 .muted-hint { color: #999; padding: 2rem 0 0; font-size: 0.92rem; }
-.subtitle    { color: #888; font-size: 0.88rem; margin-top: -0.2rem; }
+.subtitle   { color: #888; font-size: 0.88rem; margin-top: -0.2rem; }
 
 .stMarkdown { line-height: 1.7; }
 
@@ -122,30 +182,99 @@ hr { border: none; border-top: 1px solid #ececec; margin: 1.4rem 0; }
     unsafe_allow_html=True,
 )
 
-# ---------- emoji 清除（让 composer 报告去掉装饰，仅保留语义） ----------
+# ============================================================
+#                  文本清理（emoji + 工程标签）
+# ============================================================
 EMOJI_RE = re.compile(
     "["
-    "\U0001F300-\U0001F6FF"   # 各类 pictographs / transport
-    "\U0001F7E0-\U0001F7FF"   # Geometric Shapes Extended（🟡 🟢 🟠 等）
-    "\U0001F900-\U0001F9FF"   # supplemental symbols
-    "\U0001FA00-\U0001FAFF"   # symbols and pictographs extended-A
-    "☀-➿"           # misc symbols / dingbats
-    "️"                  # variation selector-16
+    "\U0001F300-\U0001F6FF"
+    "\U0001F7E0-\U0001F7FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "☀-➿"
+    "️"
     "]+",
     flags=re.UNICODE,
 )
 
+EVIDENCE_MARK_RE = re.compile(r"\s*\[ev_[a-f0-9]+\]")
 
-def strip_emoji(text: str) -> str:
+
+def clean_report(text: str) -> str:
+    """商家可读化：去 emoji 装饰、去工程哈希标签、收紧 spacing。"""
     if not text:
         return text
     out = EMOJI_RE.sub("", text)
+    out = EVIDENCE_MARK_RE.sub("", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"^([#\-\*>]+) +", r"\1 ", out, flags=re.MULTILINE)
-    return out
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = translate_overlays_in_text(out)
+    return out.strip() + "\n"
 
 
-# ---------- 数据加载 ----------
+# ============================================================
+#                  字段中文化（demo 层本地表）
+# ============================================================
+METRIC_ZH = {
+    "gmv": "成交金额", "uv": "访客数", "cvr": "转化率", "aov": "客单价",
+    "refund_rate": "退款率", "exp_score": "体验分", "rating": "评价分",
+    "monthly_gmv": "月销 GMV",
+    "live_room_stay_sec": "直播间人均停留", "fanzhuan_rate": "转粉率",
+    "uv_value": "访客价值", "main_image_ctr": "主图点击率",
+    "qianchuan_roi": "千川投产比",
+    "search_ctr": "搜索点击率", "search_exposure": "搜索曝光",
+    "mall_share": "商城频道占比",
+    "kol_roi": "达人坑位 ROI", "kol_keng_wei_roi": "达人坑位 ROI",
+    "kol_collab_count": "达人合作数", "kol_commission_rate": "达人佣金率",
+    "jxlm_ctr": "精选联盟点击率", "jingxuan_lianmeng_ctr": "精选联盟点击率",
+    "single_channel_share": "单渠道流量占比",
+    "new_sku_sell_rate": "新品动销率", "repurchase_rate": "复购率",
+    "in_sale_sku": "在售商品数", "newbie_progress": "新手任务完成度",
+    "decoration_pct": "店铺装修完整度",
+    "stale_inventory_pct": "滞销库存占比", "season_sku_count": "应季 SKU 数",
+}
+SEVERITY_ZH = {"high": "高", "medium": "中", "low": "低"}
+COST_ZH = {"high": "高", "medium": "中", "low": "低"}
+RESOURCE_TYPE_ZH = {
+    "activity": "平台活动",
+    "tool": "官方工具",
+    "template": "话术 / 模板",
+    "task": "任务清单",
+}
+OVERLAY_ZH = {
+    "nvzhuang_zibo": "女装自播店",
+    "nvzhuang_dabo": "女装达播店",
+    "nvzhuang_huojia": "女装货架店",
+    "nvzhuang_xindian": "女装新店冷启动",
+    "nvzhuang_chengzhang": "女装成长期",
+    "nvzhuang_jijie": "女装季节切换",
+}
+
+
+def metric_zh(key):
+    if not key:
+        return "—"
+    return METRIC_ZH.get(key, key)
+
+
+def overlay_zh(key):
+    if not key:
+        return "—"
+    return OVERLAY_ZH.get(key, key)
+
+
+def translate_overlays_in_text(text: str) -> str:
+    if not text:
+        return text
+    for k, v in OVERLAY_ZH.items():
+        text = text.replace(k, v)
+    return text
+
+
+# ============================================================
+#                       数据加载
+# ============================================================
 MOCKS_DIR = ROOT / "agent" / "mocks" / "shops"
 case_files = sorted(MOCKS_DIR.glob("case_*.json"))
 
@@ -168,7 +297,23 @@ def run_diagnosis_cached(case_id: str, user_query: str, window: str) -> dict:
     )
 
 
-# ---------- 左侧栏 ----------
+def wiki_category(quote: str) -> str:
+    """按 quote 内容粗分 Wiki 引用类别（sourceId 在主窗口当前实现里为 None）。"""
+    q = quote or ""
+    if "类目基线" in q or "基线" in q:
+        return "类目基线"
+    if "规则" in q or "频道升级" in q or "类目定向" in q or "调整" in q or "频道" in q:
+        return "规则变动"
+    if "活动" in q or "扶持" in q or "专场" in q or "预热" in q:
+        return "平台活动"
+    if "模板" in q or "工具" in q or "话术" in q or "申请" in q:
+        return "工具 / 模板"
+    return "其他"
+
+
+# ============================================================
+#                       左侧栏
+# ============================================================
 with st.sidebar:
     st.markdown("### 诊断对象")
     selected = st.selectbox(
@@ -180,14 +325,16 @@ with st.sidebar:
     data = json.loads(selected.read_text())
     st.markdown(f"**场景**　{data.get('_scenario_summary', '—')}")
     st.markdown(
-        f"**预期画像**　{' / '.join(data.get('_overlay_hints', [])) or '—'}"
+        f"**预期画像**　{' / '.join(overlay_zh(o) for o in data.get('_overlay_hints', [])) or '—'}"
     )
     st.markdown("---")
     user_query = st.text_input("诊断问题", value="我店铺最近 GMV 跌了")
     window = st.selectbox("窗口", ["7d", "30d"], index=0)
 
 
-# ---------- 顶部标题 ----------
+# ============================================================
+#                       顶部标题
+# ============================================================
 st.markdown("# 经营诊断 · 中小商家版")
 st.markdown(
     "<div class='subtitle'>V1 演示　·　女装类目　·　mock 数据</div>",
@@ -195,7 +342,9 @@ st.markdown(
 )
 st.markdown("")
 
-# ---------- 主体 ----------
+# ============================================================
+#                  商家画像 + 诊断报告 两栏
+# ============================================================
 col_profile, col_report = st.columns([1, 2.2], gap="large")
 
 with col_profile:
@@ -207,7 +356,7 @@ with col_profile:
         f"""
 - **店铺**　{profile.get('shop_name', '—')}
 - **类目**　{profile.get('category', '—')}
-- **入驻**　{profile.get('entry_days', 0)} 天 · 等级 {profile.get('shop_level', '—')}
+- **入驻**　{profile.get('entry_days', 0)} 天　·　等级 {profile.get('shop_level', '—')}
 - **体验分**　{profile.get('exp_score', 0)}　（准入线 {profile.get('exp_score_threshold', 4.5)}）
 - **月销**　{monthly_gmv:,} 元　（上月 {monthly_gmv_prev:,}）
 - **阶段**　{profile.get('stage', '—')}
@@ -218,7 +367,11 @@ with col_profile:
     if share:
         st.markdown("#### 流量来源")
         share_df = pd.DataFrame(
-            [{"渠道": k, "占比": v} for k, v in share.items() if isinstance(v, (int, float))]
+            [
+                {"渠道": k, "占比": v}
+                for k, v in share.items()
+                if isinstance(v, (int, float))
+            ]
         ).sort_values("占比", ascending=True)
         if not share_df.empty:
             traffic_chart = (
@@ -228,18 +381,18 @@ with col_profile:
                     x=alt.X(
                         "占比:Q",
                         axis=alt.Axis(
-                            format=".0%",
-                            grid=False,
-                            title=None,
+                            format=".0%", grid=False, title=None,
                             labelColor="#888",
                         ),
                     ),
                     y=alt.Y(
-                        "渠道:N",
-                        sort="-x",
+                        "渠道:N", sort="-x",
                         axis=alt.Axis(title=None, labelColor="#333"),
                     ),
-                    tooltip=[alt.Tooltip("渠道:N"), alt.Tooltip("占比:Q", format=".1%")],
+                    tooltip=[
+                        alt.Tooltip("渠道:N"),
+                        alt.Tooltip("占比:Q", format=".1%"),
+                    ],
                 )
                 .properties(height=max(110, 28 * len(share_df)))
                 .configure_view(strokeWidth=0)
@@ -274,56 +427,63 @@ with col_report:
             unsafe_allow_html=True,
         )
     else:
-        # 顶部 4 个 metric（自定义卡片，无色块）
+        # ---------- 顶部 4 个 metric（凸显 Wiki） ----------
         completeness = (result.get("data_completeness") or 0) * 100
-        overlays = " / ".join(result.get("matched_overlays") or []) or "—"
-        nodes = len(result.get("_trace") or [])
-        refs_n = len(result.get("evidence_refs") or [])
+        overlays = (
+            " / ".join(overlay_zh(o) for o in (result.get("matched_overlays") or []))
+            or "—"
+        )
+        evidence_refs = result.get("evidence_refs") or []
+        raw_n = sum(1 for r in evidence_refs if r.get("layer") == "raw")
+        wiki_n = sum(1 for r in evidence_refs if r.get("layer") == "wiki")
 
         mc1, mc2, mc3, mc4 = st.columns(4)
-        for col, label, val in (
-            (mc1, "数据完整度", f"{completeness:.0f}%"),
-            (mc2, "命中画像", overlays),
-            (mc3, "节点执行", str(nodes)),
-            (mc4, "证据条目", str(refs_n)),
+        for col, label, val, sub in (
+            (mc1, "数据完整度", f"{completeness:.0f}%", "店铺数据覆盖率"),
+            (mc2, "命中商家画像", overlays, "类目 overlay 自动匹配"),
+            (mc3, "数据证据", str(raw_n), "来自经营指标 / 罗盘"),
+            (mc4, "知识引用", str(wiki_n), "来自行业 Wiki / 规则库"),
         ):
             col.markdown(
                 f"<div class='metric-card'><div class='label'>{label}</div>"
-                f"<div class='value'>{val}</div></div>",
+                f"<div class='value'>{val}</div>"
+                f"<div class='sub'>{sub}</div></div>",
                 unsafe_allow_html=True,
             )
 
         st.markdown("")
 
-        # 主报告：去除 emoji 装饰后渲染
-        st.markdown(strip_emoji(result.get("report") or "(空报告)"))
+        # ---------- 主报告（去 emoji + 去 [ev_xxx] 工程标签） ----------
+        st.markdown(clean_report(result.get("report") or "(空报告)"))
 
         st.markdown("---")
         st.markdown(
-            "<div class='subtitle'>下方为结构化下钻视图，可在追问时展开。</div>",
+            "<div class='subtitle'>以下为结构化下钻视图，可在追问时展开。</div>",
             unsafe_allow_html=True,
         )
         st.markdown("")
 
-        # ---------- 异常指标可视化（Altair 横向条形图） ----------
+        # ---------- 异常指标可视化 ----------
         anomalies = result.get("anomalies") or []
         if anomalies:
             with st.expander("异常指标可视化"):
                 an_df = pd.DataFrame(
                     [
                         {
-                            "指标": a.get("metric"),
-                            "偏离基线": a.get("deviation_vs_baseline_pct", 0),
-                            "严重度": a.get("severity") or "low",
-                            "当前": a.get("current"),
-                            "基线": a.get("baseline"),
+                            "指标": metric_zh(a.get("metric")),
+                            "指标 key": a.get("metric"),
+                            "偏离基线 (%)": a.get("deviation_vs_baseline_pct", 0),
+                            "严重度": SEVERITY_ZH.get(a.get("severity") or "low", "—"),
+                            "_severity_key": a.get("severity") or "low",
+                            "当前值": a.get("current"),
+                            "基线值": a.get("baseline"),
                         }
                         for a in anomalies
                     ]
-                ).sort_values("偏离基线")
+                ).sort_values("偏离基线 (%)")
 
                 severity_scale = alt.Scale(
-                    domain=["high", "medium", "low"],
+                    domain=["高", "中", "低"],
                     range=["#8c4a3c", "#b8895a", "#a0a59c"],
                 )
 
@@ -332,7 +492,7 @@ with col_report:
                     .mark_bar(cornerRadius=3, size=18)
                     .encode(
                         x=alt.X(
-                            "偏离基线:Q",
+                            "偏离基线 (%):Q",
                             axis=alt.Axis(
                                 format="+.0f",
                                 title="偏离类目基线 (%)",
@@ -345,9 +505,9 @@ with col_report:
                         ),
                         y=alt.Y(
                             "指标:N",
-                            sort=alt.SortField("偏离基线", order="ascending"),
+                            sort=alt.SortField("偏离基线 (%)", order="ascending"),
                             axis=alt.Axis(
-                                title=None, labelColor="#333", labelFontSize=12
+                                title=None, labelColor="#333", labelFontSize=12,
                             ),
                         ),
                         color=alt.Color(
@@ -358,11 +518,11 @@ with col_report:
                             ),
                         ),
                         tooltip=[
-                            "指标",
-                            alt.Tooltip("当前:Q"),
-                            alt.Tooltip("基线:Q"),
-                            alt.Tooltip("偏离基线:Q", format="+.1f"),
-                            "严重度",
+                            alt.Tooltip("指标:N"),
+                            alt.Tooltip("当前值:Q"),
+                            alt.Tooltip("基线值:Q"),
+                            alt.Tooltip("偏离基线 (%):Q", format="+.1f"),
+                            alt.Tooltip("严重度:N"),
                         ],
                     )
                     .properties(height=max(180, 38 * len(an_df)))
@@ -371,15 +531,16 @@ with col_report:
                 )
                 st.altair_chart(anomaly_chart, use_container_width=True)
 
-        # ---------- 根因链 ----------
+        # ---------- 根因链下钻 ----------
         chains = result.get("root_cause_chains") or []
         if chains:
             with st.expander("根因链下钻"):
                 for chain in chains:
                     primary_idx = chain.get("primary_root_cause_index", 0)
+                    metric_name = metric_zh(chain.get("anomaly_metric"))
                     st.markdown(
-                        f"**{chain.get('anomaly_metric', '?')}**　"
-                        f"<span style='color:#888;font-size:0.85rem;'>主因 #{primary_idx}</span>",
+                        f"**{metric_name}**　"
+                        f"<span style='color:#888;font-size:0.85rem;'>主因 #{primary_idx + 1}</span>",
                         unsafe_allow_html=True,
                     )
                     cand_df = pd.DataFrame(
@@ -395,38 +556,50 @@ with col_report:
                     )
                     if not cand_df.empty:
                         st.dataframe(
-                            cand_df, hide_index=True, use_container_width=True
+                            cand_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "根因": st.column_config.TextColumn(width="large"),
+                                "维度": st.column_config.TextColumn(width="small"),
+                                "置信度": st.column_config.NumberColumn(format="%.2f", width="small"),
+                                "交叉验证": st.column_config.TextColumn(width="medium"),
+                            },
                         )
                     st.markdown("")
 
-        # ---------- 非数据信号（边线卡片，不用色块） ----------
+        # ---------- 非数据信号 ----------
         sigs = result.get("non_data_signals") or []
         if sigs:
-            with st.expander("非数据信号"):
+            with st.expander("非数据信号（规则 / 玩法变动）"):
                 for sig in sigs:
-                    affects = ", ".join(sig.get("affects_metrics") or []) or "—"
+                    affects_keys = sig.get("affects_metrics") or []
+                    affects = "、".join(metric_zh(k) for k in affects_keys) or "—"
                     st.markdown(
                         f"<div class='signal-card'>{sig.get('signal', '')}"
                         f"<div class='signal-meta'>影响指标：{affects}</div></div>",
                         unsafe_allow_html=True,
                     )
 
-        # ---------- 行动建议 ----------
+        # ---------- 行动建议（商家友好版） ----------
         actions = result.get("actions") or []
         if actions:
             with st.expander("行动建议清单"):
                 act_df = pd.DataFrame(
                     [
                         {
-                            "ID": a.get("action_id"),
                             "建议": a.get("title"),
-                            "对应根因": (a.get("linked_root_cause") or "")[:50],
-                            "资源 URL": (a.get("resource") or {}).get("url"),
-                            "性价比": a.get("cost_benefit"),
+                            "资源类型": RESOURCE_TYPE_ZH.get(
+                                (a.get("resource") or {}).get("type"),
+                                (a.get("resource") or {}).get("type") or "—",
+                            ),
+                            "针对指标": metric_zh(a.get("linked_anomaly_metric")),
+                            "性价比": COST_ZH.get(a.get("cost_benefit"), "—"),
                             "置信度": a.get("confidence"),
                             "门槛": "达成"
                             if (a.get("eligibility") or {}).get("met")
                             else "未达成",
+                            "资源入口": (a.get("resource") or {}).get("url"),
                         }
                         for a in actions
                     ]
@@ -436,39 +609,52 @@ with col_report:
                     hide_index=True,
                     use_container_width=True,
                     column_config={
-                        "资源 URL": st.column_config.LinkColumn(
-                            "资源 URL", display_text="打开"
+                        "建议": st.column_config.TextColumn(width="large"),
+                        "资源类型": st.column_config.TextColumn(width="small"),
+                        "针对指标": st.column_config.TextColumn(width="small"),
+                        "性价比": st.column_config.TextColumn(width="small"),
+                        "置信度": st.column_config.NumberColumn(format="%.2f", width="small"),
+                        "门槛": st.column_config.TextColumn(width="small"),
+                        "资源入口": st.column_config.LinkColumn(
+                            "资源入口", display_text="打开", width="small"
                         ),
                     },
                 )
 
-        # ---------- 证据引用 ----------
-        refs_list = result.get("evidence_refs") or []
-        if refs_list:
-            with st.expander("证据引用"):
-                ref_df = pd.DataFrame(
-                    [
-                        {
-                            "refId": r.get("refId"),
-                            "层": r.get("layer"),
-                            "来源": r.get("sourceId"),
-                            "摘要": (r.get("quoteOrSummary") or "")[:80],
-                            "置信度": r.get("confidence"),
-                        }
-                        for r in refs_list
-                    ]
-                )
-                st.dataframe(
-                    ref_df, hide_index=True, use_container_width=True
-                )
+        # ---------- Wiki 命中条目（凸显双层知识检索） ----------
+        wiki_refs = [r for r in evidence_refs if r.get("layer") == "wiki"]
+        if wiki_refs:
+            with st.expander(f"Wiki 命中条目（{len(wiki_refs)} 条 · 双层知识检索）"):
+                grouped: dict[str, list[str]] = {}
+                for r in wiki_refs:
+                    cat = wiki_category(r.get("quoteOrSummary") or "")
+                    grouped.setdefault(cat, []).append(r.get("quoteOrSummary") or "")
+                for cat in ("类目基线", "规则变动", "平台活动", "工具 / 模板", "其他"):
+                    quotes = grouped.get(cat) or []
+                    if not quotes:
+                        continue
+                    st.markdown(f"**{cat}**（{len(quotes)} 条）")
+                    for q in quotes:
+                        st.markdown(
+                            f"<div class='wiki-item'>"
+                            f"<span class='wiki-tag'>{cat}</span>{q}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("")
 
         # ---------- 节点执行轨迹 ----------
+        NODE_ZH = {
+            "checker": "体检（异常识别）",
+            "attributor": "归因（根因拆解）",
+            "advisor": "建议（资源挂钩）",
+            "composer": "组装（生成报告）",
+        }
         trace = result.get("_trace") or []
         trace_df = pd.DataFrame(
             [
                 {
-                    "节点": t.get("node"),
-                    "耗时(ms)": t.get("ms"),
+                    "节点": NODE_ZH.get(t.get("node"), t.get("node")),
+                    "耗时 (ms)": t.get("ms"),
                     "备注": t.get("note", ""),
                 }
                 for t in trace
