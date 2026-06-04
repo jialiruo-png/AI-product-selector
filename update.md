@@ -389,3 +389,35 @@ streamlit run demo/streamlit_app.py
 **提交信息**
 
 `feat(demo): add streamlit mvp for case visualization`
+
+---
+
+## 批次 X+2 · 副窗口 · 任务 C：09-演示话术稿（2026-06-05）
+
+**背景**
+
+按 `CLAUDE.md` §11.3 任务 C，完成面试/评审用演示话术稿。参考 `06-PRD.md` §2 / §14 + `08-验收用例` Case 1 全量数据。
+
+**新增**
+
+- `09-演示话术.md` — 五段式结构，总时长约 4 分钟
+  - 开场（30s）：90% 中小商家无小二的制度性结果
+  - 现状（30s）：抖店 AI 4 大短板（不找根因 / 同质化 / 缺资源 / 不处理规则变动）
+  - 方案（60s）：不做小二副驾 + 类目 overlay + 资源数据库 + 规则 Wiki + 与甘华梁共底座边界
+  - 演示（90s）：跑 Case 1 咖喱生活，逐段讲解诊断/归因/建议
+  - Q&A 预演（30s）：3 个高频问题（为什么先做女装 / 怎么保证不瞎说 / 怎么落地抖店现有系统）
+- 附演示前 30 秒 checklist + case 推荐顺序 + 不该做的事
+
+**与文档体系的衔接**
+
+- `06-PRD.md` §6 文档表格里"待写"的 `09` 文档名为"演示话术"，本批次落地
+- `CLAUDE.md` §6 表格保留 `09-演示话术.md` 占位（如需更新 CLAUDE.md 自行加一行），本批次不动 CLAUDE.md（避免和主窗口冲突）
+
+**回归验证**
+
+- ✅ `python3 -m compileall -q agent` 通过（无代码改动，纯文档）
+- ✅ 冷启动子图 mock 跑通
+
+**提交信息**
+
+`docs(demo): add 09 demo script for interview rehearsal`
