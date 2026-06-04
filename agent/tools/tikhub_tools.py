@@ -205,8 +205,11 @@ class AnalyzeReviewsTool(BaseTool):
 
         _load_client()  # 确保项目根 .env 已加载（DASHSCOPE_API_KEY / LLM_*）
         import analyze  # 需要 DASHSCOPE_API_KEY；惰性 import
+        # JSON 抽取类任务优先用非思考模型（LLM_MODEL_EXTRACT），避免 V4 思考模式
+        # 撞 analyze.py 写死的 max_tokens=2048 导致输出被截断、痛点全空。
+        extract_model = os.environ.get("LLM_MODEL_EXTRACT", "").strip() or None
         try:
-            result = analyze.analyze_reviews(reviews or [])
+            result = analyze.analyze_reviews(reviews or [], model=extract_model)
         except RuntimeError as exc:  # 缺 key / 缺包等运行期错误 -> 优雅降级
             return {"ok": False, "error": str(exc)}
         return {

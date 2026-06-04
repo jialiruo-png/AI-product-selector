@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent import llm
 from agent.state import new_evidence_ref
 
 from .base import BaseNode, get_tool
@@ -64,30 +65,77 @@ def _rating_nested(p: dict):
 # --------------------------------------------------------------------------- #
 # Step2 社媒人群
 # --------------------------------------------------------------------------- #
+_PERSONA_SYSTEM = """你是电商人群洞察专家。给定一个选品关键词、品类和一组相关搜索词，
+推断这个品类下最主要的 3~4 类目标人群。只输出 JSON：
+{"personas": [{"name": "<人群名，<=6字>", "need": "<核心诉求，<=12字>", "scene": "<典型场景，<=12字>"}]}
+约束：
+- 人群要具体可营销（如"通勤白领""油皮学生"），避免空泛（如"年轻人"）。
+- need 是该人群买这个品类时最在意的点；scene 是使用/购买场景。
+- 关键词是哪国语言就用对应市场的人群（英文关键词=海外市场人群），但 name/need/scene 用中文表述。
+- 只输出 JSON，不要解释。"""
+
+
+def _mock_personas() -> list[dict]:
+    """无 LLM 时的确定性人群（保证 mock / 缺 key 永不崩）。"""
+    return [
+        {"name": "学生党", "need": "平价", "scene": "日常通勤"},
+        {"name": "精致妈妈", "need": "安全成分", "scene": "家庭日用"},
+    ]
+
+
 class SocialAnalyzer(BaseNode):
-    """社媒人群洞察。可并行。"""
+    """社媒人群洞察。可并行。优先用 LLM 推断人群，缺 key 回退 mock。"""
 
     name = "social_analyzer"
 
+    def _llm_personas(self, keyword: str, category: str,
+                      keywords: list) -> list[dict] | None:
+        kw_line = "、".join(str(k) for k in (keywords or [])[:12])
+        user = (f"关键词：{keyword}\n品类：{category or '未指定'}\n"
+                f"相关搜索词：{kw_line or '无'}")
+        data = llm.chat_json(_PERSONA_SYSTEM, user, max_tokens=600)
+        if not isinstance(data, dict):
+            return None
+        personas = data.get("personas")
+        if not isinstance(personas, list) or not personas:
+            return None
+        out = []
+        for p in personas[:4]:
+            if isinstance(p, dict) and p.get("name"):
+                out.append({
+                    "name": str(p.get("name")).strip(),
+                    "need": str(p.get("need", "")).strip(),
+                    "scene": str(p.get("scene", "")).strip(),
+                })
+        return out or None
+
     async def run(self, state: dict) -> dict:
-        # TODO: wire real LLM / 社媒采集工具。当前 MOCK。
-        social_data = {
-            "personas": [
-                {"name": "学生党", "need": "平价"},
-                {"name": "精致妈妈", "need": "安全成分"},
-            ],
-            "koc_kol": [],
-        }
+        keyword = (state.get("keyword") or "").strip()
+        category = (state.get("category") or "").strip()
+        keywords = state.get("keywords") or []
+
+        personas = self._llm_personas(keyword, category, keywords) if keyword else None
+        if personas:
+            note = f"LLM 产出 {len(personas)} 个人群"
+            conf = 0.7
+            summary = "社媒人群画像（LLM）：" + "、".join(p["name"] for p in personas)
+        else:
+            personas = _mock_personas()
+            note = f"产出 {len(personas)} 个人群（mock 回退）"
+            conf = 0.5
+            summary = "社媒人群画像（mock）：" + "、".join(p["name"] for p in personas)
+
+        social_data = {"personas": personas, "koc_kol": []}
         refs = [new_evidence_ref(
             layer="social",
             source_id=None,
-            summary="社媒人群画像（mock）：学生党/精致妈妈",
-            confidence=0.5,
+            summary=summary,
+            confidence=conf,
         )]
         return {
             "social_data": social_data,
             "evidence_refs": self._merge_refs(state, refs),
-            "_trace": [self._trace_entry(f"产出 {len(social_data['personas'])} 个人群")],
+            "_trace": [self._trace_entry(note)],
         }
 
 
