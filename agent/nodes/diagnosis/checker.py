@@ -42,8 +42,10 @@ def _load_mock_shop(shop_id: str) -> dict:
     return {}
 
 
-def _classify_overlays(profile: dict, metrics_7d: dict) -> list[str]:
-    """根据店铺画像 + 7d 数据，判定命中哪几个女装 overlay。"""
+def _classify_overlays(
+    profile: dict, metrics_7d: dict, sku_inventory: dict | None = None,
+) -> list[str]:
+    """根据店铺画像 + 7d 数据 + 库存信号，判定命中哪几个女装 overlay。"""
     overlays: list[str] = []
     category = (profile.get("category") or "").lower()
     if "女装" not in category:
@@ -71,8 +73,14 @@ def _classify_overlays(profile: dict, metrics_7d: dict) -> list[str]:
     elif huojia_share >= 0.6:
         overlays.append("nvzhuang_huojia")
 
-    # 季节维度（mock：8 月作为夏秋切换窗口示意）
-    if profile.get("season_alert_flag"):
+    # 季节维度：多重信号触发——任意一个命中即可
+    season_signals = (
+        profile.get("season_alert_flag")
+        or (sku_inventory or {}).get("stockout_risk_level") in ("high", "medium")
+        or ((sku_inventory or {}).get("autumn_sku_gap") or 0) < -10
+        or ((sku_inventory or {}).get("summer_zhixiao_share_of_on_sale") or 0) > 0.2
+    )
+    if season_signals:
         overlays.append("nvzhuang_jijie")
 
     return overlays or ["nvzhuang_huojia"]
@@ -90,6 +98,9 @@ _METRIC_ALIASES = {
     # 自播店字段同义（副窗口可能用别名）
     "live_avg_stay_sec": "live_room_stay_sec",
     "live_fans_conversion_rate": "fanzhuan_rate",
+    # 季节切换 sku_inventory 字段
+    "summer_zhixiao_share_of_on_sale": "stale_inventory_pct",
+    "autumn_sku_count": "season_sku_count",
 }
 
 
@@ -281,8 +292,8 @@ class Checker(BaseNode):
             if k in profile and k not in metrics_7d:
                 metrics_7d[k] = profile[k]
 
-        # 2. 类目归属
-        overlays = _classify_overlays(profile, metrics_7d)
+        # 2. 类目归属（含季节切换信号）
+        overlays = _classify_overlays(profile, metrics_7d, shop_data.get("sku_inventory"))
 
         # 3 + 4. 异常识别（含基线对照）
         anomalies, refs = _detect_anomalies(metrics_7d, metrics_prev_7d, overlays)

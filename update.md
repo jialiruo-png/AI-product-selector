@@ -542,3 +542,102 @@ $ python3 -m agent.run "为什么我的店卖不动" --shop-id case_1 --diagnosi
 **提交信息**
 
 `docs(demo): add platform extensibility coda to 09 script`
+
+---
+
+## 批次 9 · 主窗口 · Day 3：接通真 LLM + 增强归因/建议/报告 + 修季节识别（贾丽婼）
+
+> 更新日期：2026-06-05
+> 负责人：贾丽婼（Liruo） · 主窗口
+> 分支：`运营`
+> 状态：Day 3 完成，5 个 case 全部端到端跑通真 LLM 版
+
+**功能说明**
+
+接通真 LLM，分档调用——只在最关键的 3 个位置增强 Agent 输出质量，主框架/数据流/降级路径全部不变。
+
+- **新增 `agent/llm.py`**：DashScope / OpenAI 兼容协议的统一封装
+  - `has_llm()` / `chat_json()` / `chat_text()` 三个对外函数
+  - 自动加载项目根 `.env`（python-dotenv 优先，缺失则简单解析）
+  - **mock 永不崩**：缺 key / `AGENT_MOCK=1` / `openai` 包未装 / 网络错误 → 全部走 mock，不抛异常
+  - 用户配的 LLM 是 DeepSeek V4 Pro（`base_url=api.deepseek.com/v1`）—— OpenAI 兼容协议，llm.py 零修改
+
+- **attributor 接 LLM**（`agent/nodes/diagnosis/attributor.py`）：
+  - 对每条 anomaly 的**主因（primary）** 调一次 LLM 生成"商家视角根因解释" + "你可以这样验证"
+  - 非主因仍用规则文案，控成本（5 个 case 累计 LLM 调用 ≤ 30 次）
+  - 输出字段 `root_cause_plain` + `what_to_check`，composer 渲染时优先用 plain 版本
+
+- **advisor 接 LLM**（`agent/nodes/diagnosis/advisor.py`）：
+  - 对 TOP-N 建议（默认 5 条）调 LLM 生成"为什么这条值得做"（≤40 字）
+  - 输出字段 `why_worth_it`，composer 渲染时挂在每条建议下方
+  - 建议本体（资源、准入、影响）依然走规则，确保资源/准入信息严格不被 LLM 编造
+
+- **composer 接 LLM**（`agent/nodes/diagnosis/composer.py`）：
+  - 报告开头新增 `## 📝 一句话讲清楚` 段——用 LLM 写 100-150 字的"老板视角"通俗摘要
+  - LLM 失败时直接省略这段，不影响其他章节
+  - 根因/建议章节渲染时优先用 LLM 增强字段
+
+- **修 case_5 季节切换识别**（`agent/nodes/diagnosis/checker.py`）：
+  - 类目归属增加季节信号触发：`stockout_risk_level / autumn_sku_gap / summer_zhixiao_share_of_on_sale` 任一命中即归入 `nvzhuang_jijie`
+  - 字段别名映射追加：`summer_zhixiao_share_of_on_sale → stale_inventory_pct`、`autumn_sku_count → season_sku_count`
+  - case_5 现在正确识别 4 条异常：滞销库存超标 153% + 秋装 SKU 缺口 73% + 千川 ROI + CVR
+
+**关键设计决定**
+
+1. **LLM 分档调用，不无差别加成本**：参考 Soul 缘分档案"按通话时长分档调 LLM"的思路，attributor 只对主因调用、advisor 只对 TOP-N 调用、composer 只调一次开篇。单次诊断 LLM 调用 ≈ 12 次（6 主因 + 5 TOP 建议 + 1 开篇）
+2. **LLM 编造的内容范围严格限定**：只允许 LLM 写"翻译/解释/为什么"，规则层产出的"指标值/资源 URL/准入门槛"全部不交给 LLM
+3. **fallback 内嵌到每个增强点**：has_llm() / LLM 调用失败 / JSON 解析失败 → 全部走规则路径，main flow 不感知
+4. **不动 graph.py / hub.py / state.py / run.py**：Day 2 的 4 个节点接口签名不变，只在节点内部增加 LLM 调用——共用资产零修改
+
+**主要文件**
+
+新增：
+- `agent/llm.py`（约 180 行）
+
+修改（仅诊断子图内部节点）：
+- `agent/nodes/diagnosis/attributor.py`：增 LLM 增强主因
+- `agent/nodes/diagnosis/advisor.py`：增 LLM 增强 TOP-N "为什么做"
+- `agent/nodes/diagnosis/composer.py`：增 LLM 开篇摘要 + 主因 plain 版本渲染
+- `agent/nodes/diagnosis/checker.py`：修 case_5 季节信号触发 + 字段别名追加
+
+**回归验证**
+
+- ✅ `python3 -m compileall -q agent` 通过
+- ✅ `python3 -m agent.run "口红" --category 美妆 --mock` 冷启动子图 9 节点 / 57 证据引用，无回归
+- ✅ 5 个 case 真 LLM 模式全部端到端跑通：
+  - case_1（咖喱生活）：6 异常 / 36 证据，LLM 把 `qianchuan_roi 实际 0.8` 翻译成 `因为转化率仅1.3%、主图点击率5.1%，导致千川投产比降至0.8` + 验证方法 ✅
+  - case_2（素笺布艺）：1 异常 / 10 证据 ✅
+  - case_3（初见女装铺）：2 异常 / 10 证据 ✅
+  - case_4（橙夏）：2 异常 / 13 证据 ✅
+  - case_5（夏树）：**4 异常 / 31 证据，季节切换 overlay 命中** ✅
+- ✅ `python3 -m agent.llm` 自检：DeepSeek V4 Pro 通，real LLM 输出正常
+
+**LLM 增强样例**（节选自 case_1 真实运行）
+
+```
+🎯 因为转化率仅1.3%、主图点击率5.1%，导致千川投产比降至0.8 · 置信度 0.92
+     👉 你可以这样验证：查看抖店商品流量分析，确认主图和转化
+
+🎯 因为直播平均停留仅22秒、主图点击率仅5.1%，导致访客价值低至1.46元
+     👉 你可以这样验证：查看直播数据看板中的停留时长和主图点击率
+
+- 【高性价比】 直播间欢迎话术 V2
+  - 资源：template://live_welcome_v2
+  - 准入：✅
+  - 预期：人均停留 +30s
+  - 💡 为什么做：免费套用模板，就能多留住观众半分钟，立竿见影
+```
+
+**价值**
+
+把 Day 2 的"规则归因 + 规则建议"升级为"规则 + LLM 双层"。规则层保证准确性（数据、资源、准入），LLM 层负责让商家听懂（翻译、为什么、可验证步骤）。这是抖店现有 AI "去优化主图"类空话与本 Agent 的根本差异。
+
+**Day 4 收尾任务（剩余）**
+
+- 接入 Streamlit demo（副窗口 demo/streamlit_app.py 把占位区换成 `from agent.run import run`）
+- 整理面试演示话术（副窗口已就位 09-演示话术.md）
+- 主观打分 5 case 的 LLM 输出质量并迭代 prompt
+
+**提交信息**
+
+`feat(diagnosis): wire real llm + enhance root cause / actions / opening`

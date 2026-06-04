@@ -12,6 +12,7 @@ mock 永不崩：metrics 缺数据时降级为"猜测，需观察"。
 from __future__ import annotations
 
 from agent.evidence import make_ref
+from agent.llm import chat_json, has_llm
 
 from ..base import BaseNode
 
@@ -171,8 +172,51 @@ def _scan_non_data_signals(
     return signals, refs
 
 
+# ---- LLM 增强：把规则归因翻译成商家能听懂的话 ----
+_LLM_SYSTEM_PROMPT = """你是抖音电商资深运营顾问，帮中小商家把"指标动了"翻译成"商家能听懂的根因解释"。
+
+你会拿到一条根因数据（指标名/当前值/基线/类目场景/跨场景耦合证据）。请输出严格 JSON：
+{
+  "root_cause_plain": "<一句话商家能听懂的根因描述，<=40字，避免行话>",
+  "what_to_check": "<商家自己可以立刻看哪个后台/工具确认这个根因，<=30字>"
+}
+
+要求：
+- root_cause_plain 用"因为...所以..."或"...导致..."句式，必须含具体数字
+- 不要给建议（建议是行动建议专家的事）
+- 不要重复输入里已有的指标名，要"翻译"成商家视角
+"""
+
+
+def _llm_enhance_primary(
+    anomaly: dict,
+    primary: dict,
+    overlays: list[str],
+    coupled_evidence: list[str],
+) -> dict | None:
+    """对主因调一次 LLM 生成"商家视角解释"。失败返回 None，保留规则文案。"""
+    if not has_llm():
+        return None
+    user_payload = (
+        f"指标：{anomaly['metric']}\n"
+        f"当前值：{anomaly['current']}\n"
+        f"类目基线：{anomaly['baseline']}\n"
+        f"偏离基线：{anomaly['deviation_vs_baseline_pct']}%\n"
+        f"严重度：{anomaly['severity']}\n"
+        f"店铺画像 overlay：{', '.join(overlays)}\n"
+        f"跨场景耦合证据：{'; '.join(coupled_evidence) if coupled_evidence else '无'}\n"
+    )
+    return chat_json(
+        system=_LLM_SYSTEM_PROMPT,
+        user=user_payload,
+        max_tokens=400,
+        temperature=0.3,
+        mock_fallback=None,
+    )
+
+
 class Attributor(BaseNode):
-    """归因专家：MECE 拆维度 + 跨场景交叉 + 非数据信号检索。"""
+    """归因专家：MECE 拆维度 + 跨场景交叉 + 非数据信号检索 + LLM 通俗化解释。"""
 
     name = "attributor"
 
@@ -184,6 +228,8 @@ class Attributor(BaseNode):
         # 对每条 anomaly 拆候选根因
         root_cause_chains: list[dict] = []
         all_refs: list[dict] = []
+        llm_calls = 0
+
         for anomaly in anomalies:
             candidates, refs = _build_candidates(anomaly, metrics_7d, overlays)
             all_refs.extend(refs)
@@ -194,6 +240,21 @@ class Attributor(BaseNode):
                 if c["confidence"] > best_conf:
                     best_conf = c["confidence"]
                     primary_idx = i
+
+            # LLM 增强：仅对主因调用，生成商家视角解释
+            primary = candidates[primary_idx]
+            coupled_evidence = [
+                c["root_cause"] for i, c in enumerate(candidates) if i != primary_idx
+            ]
+            enhanced = _llm_enhance_primary(anomaly, primary, overlays, coupled_evidence)
+            if enhanced and not enhanced.get("_mock") and not enhanced.get("_parse_error"):
+                plain = (enhanced.get("root_cause_plain") or "").strip()
+                what_to_check = (enhanced.get("what_to_check") or "").strip()
+                if plain:
+                    # 覆盖主因的 root_cause 文案，保留 evidence_refs / confidence
+                    primary["root_cause_plain"] = plain
+                    primary["what_to_check"] = what_to_check
+                    llm_calls += 1
 
             root_cause_chains.append({
                 "anomaly_metric": anomaly["metric"],
@@ -208,7 +269,8 @@ class Attributor(BaseNode):
 
         note = (
             f"chains={len(root_cause_chains)} "
-            f"non_data_signals={len(non_data_signals)} refs+{len(all_refs)}"
+            f"non_data_signals={len(non_data_signals)} "
+            f"refs+{len(all_refs)} llm_calls={llm_calls}"
         )
 
         return {

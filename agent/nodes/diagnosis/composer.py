@@ -2,8 +2,11 @@
 
 把 Checker / Attributor / Advisor 的产物组装成商家可读的 markdown 报告。
 每条结论后挂可点的 [refId]，文末列证据表。
+开篇用 LLM 写一段"老板视角"通顺摘要（mock 时走模板兜底）。
 """
 from __future__ import annotations
+
+from agent.llm import chat_text, has_llm
 
 from ..base import BaseNode
 
@@ -35,7 +38,13 @@ def _format_root_cause(chain: dict) -> str:
         refs = c.get("evidence_refs") or []
         refs_inline = " ".join(f"[{r}]" for r in refs[:2])
         cv_text = f"（{cv}）" if cv else ""
-        lines.append(f"{marker} **{c['root_cause']}** · 置信度 {conf}{cv_text} {refs_inline}")
+        # 如果是主因且有 LLM 增强的"商家视角"翻译，优先用通俗版本
+        body = c.get("root_cause_plain") if i == primary_idx else None
+        body = body or c["root_cause"]
+        lines.append(f"{marker} **{body}** · 置信度 {conf}{cv_text} {refs_inline}")
+        # 主因带"商家自己怎么验证"
+        if i == primary_idx and c.get("what_to_check"):
+            lines.append(f"     👉 你可以这样验证：{c['what_to_check']}")
     return "\n".join(lines)
 
 
@@ -47,14 +56,16 @@ def _format_action(action: dict) -> str:
     url = (action.get("resource") or {}).get("url", "")
     refs = action.get("evidence_refs") or []
     refs_inline = " ".join(f"[{r}]" for r in refs[:1])
+    why = action.get("why_worth_it", "")
 
     cost_tag = {"high": "【高性价比】", "medium": "【中等】", "low": "【需观察】"}.get(cost, "")
     elig_note = "✅" if elig.get("met") else f"⚠️ {elig.get('details', '')}"
+    why_line = f"\n  - 💡 为什么做：{why}" if why else ""
     return (
         f"- {cost_tag} **{title}** {refs_inline}\n"
         f"  - 资源：`{url}`\n"
         f"  - 准入：{elig_note}\n"
-        f"  - 预期：{impact}"
+        f"  - 预期：{impact}{why_line}"
     )
 
 
@@ -90,6 +101,57 @@ def _shop_header(profile: dict, summary: str) -> str:
     )
 
 
+_LLM_OPENING_SYSTEM = """你是抖音电商资深运营顾问，给一个店铺老板看的经营诊断报告写一段开篇摘要。
+
+要求：
+- 100-150 字之间，一段话，不分段
+- 老板视角，"你的店本周..."句式开头
+- 必须串起：核心问题 → 1-2 条主要根因 → 1-2 条最值得做的动作
+- 用大白话，不用"漏斗/CR/ROI"等术语
+- 结尾用激励语气，避免悲观
+"""
+
+
+def _llm_opening(profile: dict, summary: str, anomalies: list[dict],
+                 chains: list[dict], actions: list[dict],
+                 top_n: list[int]) -> str:
+    """开篇 LLM 摘要。无 LLM 时返回空（不写这段）。"""
+    if not has_llm():
+        return ""
+
+    # 拼一份精简 context，避免塞太多 token
+    name = profile.get("shop_name", "店铺")
+    top_anomaly = anomalies[0] if anomalies else None
+    primary_causes = []
+    for chain in chains[:2]:
+        cands = chain.get("candidates") or []
+        idx = chain.get("primary_root_cause_index", 0)
+        if idx < len(cands):
+            primary = cands[idx]
+            primary_causes.append(
+                primary.get("root_cause_plain") or primary.get("root_cause", "")
+            )
+
+    top_actions = []
+    for idx in top_n[:3]:
+        if idx < len(actions):
+            top_actions.append(actions[idx]["title"])
+
+    user_payload = (
+        f"店名：{name}\n"
+        f"核心问题：{summary}\n"
+        f"主要根因：\n" + "\n".join(f"- {c}" for c in primary_causes) + "\n"
+        f"建议优先动作：\n" + "\n".join(f"- {a}" for a in top_actions)
+    )
+    return chat_text(
+        system=_LLM_OPENING_SYSTEM,
+        user=user_payload,
+        max_tokens=400,
+        temperature=0.5,
+        mock_fallback="",
+    )
+
+
 class Composer(BaseNode):
     """报告组装：把诊断/归因/建议组装成商家可读 markdown。"""
 
@@ -117,6 +179,11 @@ class Composer(BaseNode):
             parts.append(
                 f"\n> 🏷️ 适用画像：{' / '.join(overlays)} · 数据完整度 {int(completeness * 100)}%\n"
             )
+
+        # LLM 开篇摘要（老板视角通俗版）
+        opening = _llm_opening(profile, summary, anomalies, chains, actions, top_n)
+        if opening:
+            parts.append(f"\n## 📝 一句话讲清楚\n\n{opening}\n")
 
         # 异常清单
         if anomalies:

@@ -13,6 +13,7 @@ mock 永不崩：无资源可挂时降级为"当前无对应资源，建议先 X
 from __future__ import annotations
 
 from agent.evidence import make_ref
+from agent.llm import chat_json, has_llm
 
 from ..base import BaseNode
 
@@ -354,8 +355,57 @@ def _build_actions(
     return actions, refs
 
 
+# ---- LLM 增强：把"挂上的资源"翻译成商家视角的"为什么这条值得做" ----
+_LLM_REASON_PROMPT = """你是抖音电商资深运营顾问。给一条建议（已包含 资源名称/类型/链接/准入状态/预期影响 + 关联根因），生成一句 ≤40 字的"为什么这条建议值得做"。
+
+输出严格 JSON：
+{
+  "why_worth_it": "<≤40字的为什么>"
+}
+
+要求：
+- 必须基于输入的根因和预期影响，逻辑链清楚
+- 商家视角，避免行话（不要说 ROI、CTR 等术语，用"投入产出比"、"点击率"等替代）
+- 优先突出"低成本 + 高确定性"
+- 如果准入未达标，要先说"先把 X 做到 Y 才能用"
+"""
+
+
+def _llm_enhance_actions(actions: list[dict], top_n: list[int]) -> int:
+    """对 TOP-N 建议调 LLM 生成"为什么值得做"。返回调用次数。"""
+    if not has_llm():
+        return 0
+    calls = 0
+    for idx in top_n:
+        if idx >= len(actions):
+            continue
+        a = actions[idx]
+        user_payload = (
+            f"建议标题：{a['title']}\n"
+            f"资源类型：{a['resource']['type']}\n"
+            f"资源链接：{a['resource']['url']}\n"
+            f"准入状态：{'达标' if a['eligibility']['met'] else '未达标 - ' + a['eligibility']['details']}\n"
+            f"预期影响：{a['expected_impact']}\n"
+            f"关联根因：{a['linked_root_cause']}\n"
+            f"性价比评级：{a['cost_benefit']}\n"
+        )
+        result = chat_json(
+            system=_LLM_REASON_PROMPT,
+            user=user_payload,
+            max_tokens=200,
+            temperature=0.4,
+            mock_fallback=None,
+        )
+        if result and not result.get("_mock") and not result.get("_parse_error"):
+            why = (result.get("why_worth_it") or "").strip()
+            if why:
+                a["why_worth_it"] = why
+                calls += 1
+    return calls
+
+
 class Advisor(BaseNode):
-    """行动建议专家：资源匹配 + 准入校验 + 排序输出。"""
+    """行动建议专家：资源匹配 + 准入校验 + 排序输出 + LLM 增强"为什么值得做"。"""
 
     name = "advisor"
 
@@ -390,7 +440,13 @@ class Advisor(BaseNode):
 
         top_n_for_user = list(range(min(5, len(actions))))
 
-        note = f"actions={len(actions)} top_n={len(top_n_for_user)} refs+{len(refs)}"
+        # LLM 增强 TOP-N 建议的"为什么值得做"
+        llm_calls = _llm_enhance_actions(actions, top_n_for_user)
+
+        note = (
+            f"actions={len(actions)} top_n={len(top_n_for_user)} "
+            f"refs+{len(refs)} llm_calls={llm_calls}"
+        )
 
         return {
             "actions": actions,
