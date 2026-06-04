@@ -693,3 +693,42 @@ streamlit run demo/streamlit_app.py
 **提交信息**
 
 `feat(demo): wire streamlit to real run_diagnosis (skip day-4 wait)`
+
+---
+
+## 批次 X+5 · 副窗口 · Streamlit demo 视觉去 AI 痕迹（2026-06-05）
+
+**背景**
+
+X+4 接通 Agent 之后，demo 视觉上还是默认 Streamlit 味——大色块（warning 黄 / info 蓝 / primary 红按钮）、emoji 散落（🎯 ⚠️ 🔴 🟡 🏷️）、`st.metric` 卡片标签灰白对比强、`st.dataframe` 默认斑马纹。这些都是"AI demo"的明显痕迹，面试时容易让面试官认为是套壳玩具。本批次重写 UI 层，对齐"产品级中后台"观感。
+
+**修改**
+
+- `demo/streamlit_app.py`（重写视觉层，逻辑不变）：
+  - **全局 CSS**：隐藏 Streamlit chrome（顶栏 / footer / hamburger）；统一系统字体（PingFang SC / -apple-system）；按钮改深灰扁平（去 primary 红）；blockquote 改左边灰竖线（去蓝色块）；expander 改浅灰底圆角；侧边栏淡灰背景；分隔线去黑改 1px 浅灰
+  - **去 emoji**：`strip_emoji()` 用 5 段 Unicode 区间（含 Geometric Shapes Extended 覆盖 🟡 🟢）清掉 composer 报告里的所有装饰 emoji，保留 markdown 结构（# / - / >）。原 `## 🎯 核心问题` → `## 核心问题`，`- 🔴 **千川投产比**` → `- **千川投产比**`
+  - **metric 卡片自定义**：用 `<div class='metric-card'>` 取代 `st.metric`，纯黑白灰 + 小标题大值，无任何色块
+  - **Altair 横向条形图**：
+    - 商家画像里的"流量来源" → 单色（#5a5a5a）横向条形图
+    - 异常指标 → 严重度按 muted earth tones 配色（high #8c4a3c / medium #b8895a / low #a0a59c），避免饱和红黄绿
+  - **非数据信号** → 左边灰竖线的 `.signal-card`，不再用 `st.warning` 黄色块
+  - **expander 标题去 emoji**：`异常指标可视化` / `根因链下钻` / `非数据信号` / `行动建议清单` / `证据引用` / `节点执行轨迹` / `完整 final_state（调试）`
+  - **行动建议表格**：`column_config.LinkColumn(display_text="打开")` 把资源 URL 渲染成文字超链
+  - 顶部副标题用 ideographic space + #888 灰，弱化"V1 演示 / mock 数据"标签
+
+**回归验证**
+
+- ✅ `python3 -m py_compile demo/streamlit_app.py`
+- ✅ `streamlit run` 启动成功，`/_stcore/health` 200
+- ✅ `strip_emoji(report)` 在完整 case_1 报告上 sweep，剩余可疑字符 = set()（包括 🟡 🟢 等 Geometric Shapes Extended block）
+- ✅ 主窗口 Day 3 commit `bf1397e` 已经把 composer 输出里的英文 metric 名翻译为中文（千川投产比 / 访客价值 / 直播间人均停留 / 转粉率），观感更"产品"
+
+**为什么主报告保留中文 metric 而下钻表保留英文 metric**
+
+- 主报告（composer 渲染的 markdown）面向商家：中文 metric 名易读
+- 下钻表（异常清单 / 根因链）面向追问：英文 metric 名（来自 anomalies['metric'] 字段）和 schema 一致，便于面试讲解技术细节
+- 不在 demo 层翻译——避免和主窗口的语义层冲突
+
+**提交信息**
+
+`refactor(demo): neutralize ui — strip emoji, mute palette, custom cards`
