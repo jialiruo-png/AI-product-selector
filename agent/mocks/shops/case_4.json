@@ -1,0 +1,122 @@
+{
+  "_mock": true,
+  "_case_id": "case_4",
+  "_case_name": "橙夏",
+  "_overlay_hints": ["nvzhuang_dabo"],
+  "_scenario_summary": "女装达播店，达人合作数+27% 但坑位 ROI 暴跌 54%，新合作达人选品错配",
+
+  "shop_profile": {
+    "shop_id": "mock_shop_004",
+    "shop_name": "橙夏品牌旗舰",
+    "category": "女装>套装",
+    "entry_days": 280,
+    "shop_level": "L5",
+    "exp_score": 4.81,
+    "exp_score_threshold": 4.5,
+    "exp_score_gap": 0.31,
+    "is_new_shop": false,
+    "stage": "成熟期",
+    "monthly_gmv": 2150000,
+    "monthly_gmv_prev": 2680000,
+    "monthly_gmv_mom": -0.198,
+    "dau_gmv_share": {
+      "dabo": 0.58,
+      "live": 0.20,
+      "search": 0.15,
+      "mall": 0.07
+    }
+  },
+
+  "metrics_7d": {
+    "gmv": 380000,
+    "uv": 138000,
+    "cvr": 0.022,
+    "aov": 125,
+    "kol_collab_count": 28,
+    "kol_keng_wei_roi": 1.1,
+    "kol_commission_rate": 0.22,
+    "jingxuan_lianmeng_ctr": 0.028,
+    "main_image_ctr": 0.061,
+    "refund_rate": 0.054
+  },
+  "metrics_prev_7d": {
+    "gmv": 520000,
+    "uv": 142000,
+    "cvr": 0.028,
+    "aov": 131,
+    "kol_collab_count": 22,
+    "kol_keng_wei_roi": 2.4,
+    "kol_commission_rate": 0.22,
+    "jingxuan_lianmeng_ctr": 0.035,
+    "main_image_ctr": 0.063,
+    "refund_rate": 0.049
+  },
+  "metrics_30d": {
+    "gmv": 2150000,
+    "uv": 560000,
+    "cvr": 0.025,
+    "aov": 128,
+    "refund_rate": 0.051
+  },
+
+  "category_baseline": {
+    "_source": "女装>套装·达播渠道行业均值（近 30 天）",
+    "kol_keng_wei_roi": 2.2,
+    "kol_commission_rate": 0.20,
+    "jingxuan_lianmeng_ctr": 0.040,
+    "cvr": 0.026,
+    "refund_rate": 0.055
+  },
+
+  "traffic_breakdown": {
+    "dabo": {"uv": 80040, "gmv": 220400, "cvr": 0.024},
+    "live": {"uv": 27600, "gmv": 76000, "cvr": 0.020},
+    "search": {"uv": 20700, "gmv": 57000, "cvr": 0.018},
+    "mall": {"uv": 9660, "gmv": 26600, "cvr": 0.022}
+  },
+
+  "sku_performance": [
+    {"sku_id": "sku_401", "sku_name": "气质两件套连衣裙", "price": 268, "gmv_7d": 95000, "uv_7d": 21000, "cvr": 0.025, "refund_rate": 0.05, "is_main_sku": true, "kol_pushed": true},
+    {"sku_id": "sku_402", "sku_name": "通勤西装套装", "price": 398, "gmv_7d": 78000, "uv_7d": 16500, "cvr": 0.024, "refund_rate": 0.06, "is_main_sku": true, "kol_pushed": true},
+    {"sku_id": "sku_403", "sku_name": "运动休闲套装女", "price": 199, "gmv_7d": 56000, "uv_7d": 18800, "cvr": 0.020, "refund_rate": 0.07, "is_main_sku": false, "kol_pushed": true},
+    {"sku_id": "sku_404", "sku_name": "度假风套装雪纺", "price": 228, "gmv_7d": 42000, "uv_7d": 14200, "cvr": 0.018, "refund_rate": 0.08, "is_main_sku": false, "kol_pushed": false},
+    {"sku_id": "sku_405", "sku_name": "针织套装秋款新品", "price": 318, "gmv_7d": 35000, "uv_7d": 12000, "cvr": 0.021, "refund_rate": 0.05, "is_main_sku": false, "kol_pushed": true}
+  ],
+
+  "kol_metrics": {
+    "total_kol_count": 28,
+    "new_kol_count_7d": 6,
+    "old_kol_count_7d": 22,
+    "new_kol_avg_roi": 0.72,
+    "old_kol_avg_roi": 2.0,
+    "low_roi_kol_count": 6,
+    "low_roi_kol_share_of_new": 1.0,
+    "kol_list": [
+      {"kol_id": "kol_001", "kol_name": "辣妈选品记", "is_new": true,  "fan_profile_match_score": 0.42, "roi": 0.6, "gmv_7d": 8500, "fan_age": "35-45", "shop_target_age": "22-30"},
+      {"kol_id": "kol_002", "kol_name": "学生党穿搭", "is_new": true,  "fan_profile_match_score": 0.38, "roi": 0.5, "gmv_7d": 6200, "fan_age": "18-22", "shop_target_age": "22-30"},
+      {"kol_id": "kol_003", "kol_name": "通勤白领日记", "is_new": true, "fan_profile_match_score": 0.78, "roi": 0.9, "gmv_7d": 12000, "fan_age": "25-32", "shop_target_age": "22-30"},
+      {"kol_id": "kol_004", "kol_name": "中年优雅",   "is_new": true,  "fan_profile_match_score": 0.31, "roi": 0.4, "gmv_7d": 4800, "fan_age": "40-55", "shop_target_age": "22-30"},
+      {"kol_id": "kol_005", "kol_name": "校园风尚",   "is_new": true,  "fan_profile_match_score": 0.35, "roi": 0.7, "gmv_7d": 7100, "fan_age": "18-23", "shop_target_age": "22-30"},
+      {"kol_id": "kol_006", "kol_name": "辣妹种草",   "is_new": true,  "fan_profile_match_score": 0.55, "roi": 0.9, "gmv_7d": 10500, "fan_age": "22-28", "shop_target_age": "22-30"},
+      {"kol_id": "kol_010", "kol_name": "甜美姐姐",   "is_new": false, "fan_profile_match_score": 0.88, "roi": 2.6, "gmv_7d": 45000, "fan_age": "22-30", "shop_target_age": "22-30"},
+      {"kol_id": "kol_011", "kol_name": "都市丽人",   "is_new": false, "fan_profile_match_score": 0.82, "roi": 2.3, "gmv_7d": 38000, "fan_age": "25-32", "shop_target_age": "22-30"}
+    ]
+  },
+
+  "jingxuan_lianmeng": {
+    "joined": true,
+    "active_sku_count": 12,
+    "ctr_7d": 0.028,
+    "ctr_prev_7d": 0.035,
+    "ranking_drop": true
+  },
+
+  "fulfillment_metrics": {
+    "ship_in_24h_rate": 0.94,
+    "ship_in_48h_rate": 0.98,
+    "dispute_rate": 0.012,
+    "negative_review_rate": 0.026
+  },
+
+  "newbie_progress": null
+}

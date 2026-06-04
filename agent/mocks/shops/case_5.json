@@ -1,0 +1,140 @@
+{
+  "_mock": true,
+  "_case_id": "case_5",
+  "_case_name": "夏树",
+  "_overlay_hints": ["nvzhuang_jijie", "nvzhuang_zibo"],
+  "_scenario_summary": "女装自播店季节切换期，夏装滞销 12w 压资金 + 秋装备货严重不足",
+
+  "shop_profile": {
+    "shop_id": "mock_shop_005",
+    "shop_name": "夏树女装",
+    "category": "女装>连衣裙/T恤",
+    "entry_days": 410,
+    "shop_level": "L3",
+    "exp_score": 4.65,
+    "exp_score_threshold": 4.5,
+    "exp_score_gap": 0.15,
+    "is_new_shop": false,
+    "stage": "成熟期",
+    "current_phase": "夏装清仓 + 秋装预备",
+    "current_period_label": "8月初",
+    "monthly_gmv": 650000,
+    "monthly_gmv_prev": 720000,
+    "monthly_gmv_mom": -0.097,
+    "dau_gmv_share": {
+      "live": 0.70,
+      "search": 0.15,
+      "video": 0.08,
+      "mall": 0.07
+    }
+  },
+
+  "metrics_7d": {
+    "gmv": 138000,
+    "uv": 64000,
+    "cvr": 0.018,
+    "aov": 120,
+    "live_room_stay_sec": 52,
+    "fanzhuan_rate": 0.026,
+    "main_image_ctr": 0.064,
+    "qianchuan_roi": 1.4,
+    "refund_rate": 0.068
+  },
+  "metrics_prev_7d": {
+    "gmv": 152000,
+    "uv": 66800,
+    "cvr": 0.019,
+    "aov": 121,
+    "live_room_stay_sec": 55,
+    "fanzhuan_rate": 0.028,
+    "main_image_ctr": 0.065,
+    "qianchuan_roi": 1.5,
+    "refund_rate": 0.064
+  },
+  "metrics_30d": {
+    "gmv": 650000,
+    "uv": 270000,
+    "cvr": 0.018,
+    "aov": 122,
+    "refund_rate": 0.066
+  },
+
+  "category_baseline": {
+    "_source": "女装>连衣裙·自播渠道行业均值（近 30 天）+ 季节切换期参考",
+    "cvr": 0.022,
+    "aov": 128,
+    "live_room_stay_sec": 60,
+    "fanzhuan_rate": 0.030,
+    "main_image_ctr": 0.075,
+    "refund_rate": 0.075,
+    "autumn_sku_count_industry_avg": 30
+  },
+
+  "traffic_breakdown": {
+    "live": {"uv": 44800, "gmv": 96600, "cvr": 0.019},
+    "search": {"uv": 9600, "gmv": 20700, "cvr": 0.020},
+    "video": {"uv": 5120, "gmv": 11040, "cvr": 0.017},
+    "mall": {"uv": 4480, "gmv": 9660, "cvr": 0.016}
+  },
+
+  "sku_performance": [
+    {"sku_id": "sku_501", "sku_name": "夏季雪纺连衣裙", "price": 119, "gmv_7d": 28000, "uv_7d": 12500, "cvr": 0.018, "refund_rate": 0.07, "is_main_sku": true, "season": "summer", "inventory": 480},
+    {"sku_id": "sku_502", "sku_name": "短袖印花 T 恤", "price": 69, "gmv_7d": 18000, "uv_7d": 10200, "cvr": 0.022, "refund_rate": 0.06, "is_main_sku": true, "season": "summer", "inventory": 620},
+    {"sku_id": "sku_503", "sku_name": "吊带连衣裙度假", "price": 89, "gmv_7d": 14500, "uv_7d": 9800, "cvr": 0.017, "refund_rate": 0.08, "is_main_sku": false, "season": "summer", "inventory": 340},
+    {"sku_id": "sku_504", "sku_name": "薄款针织衫秋款", "price": 149, "gmv_7d": 9200, "uv_7d": 4800, "cvr": 0.013, "refund_rate": 0.05, "is_main_sku": false, "season": "autumn", "inventory": 80},
+    {"sku_id": "sku_505", "sku_name": "茶歇风连衣裙秋款", "price": 169, "gmv_7d": 6800, "uv_7d": 3600, "cvr": 0.014, "refund_rate": 0.05, "is_main_sku": false, "season": "autumn", "inventory": 60}
+  ],
+
+  "sku_inventory": {
+    "total_on_sale_sku": 110,
+    "summer_sku_count": 80,
+    "summer_zhixiao_sku_count": 42,
+    "summer_zhixiao_share_of_on_sale": 0.38,
+    "summer_zhixiao_share_of_summer": 0.525,
+    "summer_zhixiao_value": 120000,
+    "summer_zhixiao_capital_share": 0.22,
+    "summer_promo_active": false,
+    "summer_qingcang_activity_joined": false,
+    "autumn_sku_count": 8,
+    "autumn_sku_industry_avg": 30,
+    "autumn_sku_gap": -22,
+    "autumn_keyword_trend_14d": 1.65,
+    "autumn_keyword_trend_label": "+165% (近 14 天)",
+    "trending_autumn_keywords": ["微胖显瘦", "茶歇风", "针织开衫", "气质连衣裙秋款", "学院风毛衣"],
+    "stockout_risk_level": "high"
+  },
+
+  "activity_signals": [
+    {
+      "activity_id": "xiazhuang_qingcang_2026",
+      "activity_name": "夏装清仓直播专场",
+      "deadline_days": 5,
+      "shop_eligible": true,
+      "shop_joined": false
+    },
+    {
+      "activity_id": "qiuzhuang_souyuanre_2026",
+      "activity_name": "秋装搜索流量包",
+      "deadline_days": 12,
+      "shop_eligible": true,
+      "shop_joined": false
+    }
+  ],
+
+  "live_room_metrics": {
+    "live_sessions_7d": 12,
+    "live_total_hours": 78,
+    "avg_concurrent_viewers": 410,
+    "summer_product_live_share": 0.78,
+    "autumn_product_live_share": 0.08
+  },
+
+  "fulfillment_metrics": {
+    "ship_in_24h_rate": 0.92,
+    "ship_in_48h_rate": 0.98,
+    "dispute_rate": 0.015,
+    "negative_review_rate": 0.028
+  },
+
+  "newbie_progress": null
+}
