@@ -199,13 +199,36 @@ EMOJI_RE = re.compile(
 
 EVIDENCE_MARK_RE = re.compile(r"\s*\[ev_[a-f0-9]+\]")
 
+# §9.1 去 jargon：composer.py / attributor.py 仍输出"当前/基线/偏离/置信度"，渲染层替换为商家话。
+_ANOMALY_LINE_RE = re.compile(r"当前\s*([^/]+?)\s*/\s*基线\s*([^/]+?)\s*/\s*偏离\s*([\-+]?[\d.]+)\s*%")
+_CONFIDENCE_TAIL_RE = re.compile(r"\s*[·•・]\s*置信度\s*[\d.]+")
+_ROOT_CAUSE_HEAD_RE = re.compile(r"^###\s*异常指标：\s*(.+)$", re.MULTILINE)
+# attributor.py 把 root cause 写成「X（cur）显著偏离类目基线（base）」/「X 同期异动（cur），存在相关性」
+_ROOT_CAUSE_DEVIATE_RE = re.compile(r"(\S+?)（([^）]+)）显著偏离类目基线（([^）]+)）")
+_ROOT_CAUSE_COVAR_RE = re.compile(r"(\S+?)同期异动（([^）]+)），存在相关性")
+_BASELINE_BARE_RE = re.compile(r"类目基线")
+_DEVIATE_BARE_RE = re.compile(r"偏离基线")
+
 
 def clean_report(text: str) -> str:
-    """商家可读化：去 emoji 装饰、去工程哈希标签、收紧 spacing。"""
+    """商家可读化：去 emoji 装饰、去工程哈希标签、把 jargon 替换成老板话。"""
     if not text:
         return text
     out = EMOJI_RE.sub("", text)
     out = EVIDENCE_MARK_RE.sub("", out)
+    # §9.1 第 2 条「拟人化对比」：当前/基线/偏离 → 你的/同行/差距
+    out = _ANOMALY_LINE_RE.sub(r"你的 \1 · 同行 \2 · 差距 \3%", out)
+    # §9.1 第 3/4 条精神：商家不在意置信度，整段删掉
+    out = _CONFIDENCE_TAIL_RE.sub("", out)
+    out = out.replace("按性价比 × 置信度排序", "按投入产出排序")
+    out = out.replace("性价比 × 置信度", "投入产出")
+    # 根因文本里 attributor.py 写的 jargon
+    out = _ROOT_CAUSE_DEVIATE_RE.sub(r"\1 你做到 \2 · 同行 \3", out)
+    out = _ROOT_CAUSE_COVAR_RE.sub(r"\1 同时也在变（你: \2），可能是连带原因", out)
+    out = _BASELINE_BARE_RE.sub("同行水平", out)
+    out = _DEVIATE_BARE_RE.sub("差距", out)
+    # 标题人话化
+    out = _ROOT_CAUSE_HEAD_RE.sub(r"### \1 偏弱（需要关注）", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"^([#\-\*>]+) +", r"\1 ", out, flags=re.MULTILINE)
     out = re.sub(r"\n{3,}", "\n\n", out)
@@ -217,12 +240,16 @@ def clean_report(text: str) -> str:
 #                  字段中文化（demo 层本地表）
 # ============================================================
 METRIC_ZH = {
-    "gmv": "成交金额", "uv": "访客数", "cvr": "转化率", "aov": "客单价",
-    "refund_rate": "退款率", "exp_score": "体验分", "rating": "评价分",
+    "gmv": "成交金额", "uv": "访客数",
+    "cvr": "每 100 人下单数（转化率）",
+    "aov": "客单价",
+    "refund_rate": "每 100 单退款数（退款率）",
+    "exp_score": "体验分", "rating": "评价分",
     "monthly_gmv": "月销 GMV",
-    "live_room_stay_sec": "直播间人均停留", "fanzhuan_rate": "转粉率",
+    "live_room_stay_sec": "直播间停留秒数",
+    "fanzhuan_rate": "转粉率",
     "uv_value": "访客价值", "main_image_ctr": "主图点击率",
-    "qianchuan_roi": "千川投产比",
+    "qianchuan_roi": "千川每花 100 元换回（投产比）",
     "search_ctr": "搜索点击率", "search_exposure": "搜索曝光",
     "mall_share": "商城频道占比",
     "kol_roi": "达人坑位 ROI", "kol_keng_wei_roi": "达人坑位 ROI",
@@ -337,7 +364,7 @@ with st.sidebar:
 # ============================================================
 st.markdown("# 经营诊断 · 中小商家版")
 st.markdown(
-    "<div class='subtitle'>V1 演示　·　女装类目　·　mock 数据</div>",
+    "<div class='subtitle'>V1 演示　·　女装类目　·　老板视角（去专业词）</div>",
     unsafe_allow_html=True,
 )
 st.markdown("")
@@ -472,30 +499,24 @@ with col_report:
                         {
                             "指标": metric_zh(a.get("metric")),
                             "指标 key": a.get("metric"),
-                            "偏离基线 (%)": a.get("deviation_vs_baseline_pct", 0),
-                            "严重度": SEVERITY_ZH.get(a.get("severity") or "low", "—"),
+                            "差距 (%)": a.get("deviation_vs_baseline_pct", 0),
                             "_severity_key": a.get("severity") or "low",
-                            "当前值": a.get("current"),
-                            "基线值": a.get("baseline"),
+                            "你的": a.get("current"),
+                            "同行做到": a.get("baseline"),
                         }
                         for a in anomalies
                     ]
-                ).sort_values("偏离基线 (%)")
-
-                severity_scale = alt.Scale(
-                    domain=["高", "中", "低"],
-                    range=["#8c4a3c", "#b8895a", "#a0a59c"],
-                )
+                ).sort_values("差距 (%)")
 
                 anomaly_chart = (
                     alt.Chart(an_df)
-                    .mark_bar(cornerRadius=3, size=18)
+                    .mark_bar(cornerRadius=3, size=18, color="#8c4a3c")
                     .encode(
                         x=alt.X(
-                            "偏离基线 (%):Q",
+                            "差距 (%):Q",
                             axis=alt.Axis(
                                 format="+.0f",
-                                title="偏离类目基线 (%)",
+                                title="你和同行的差距 (%)",
                                 titleColor="#666",
                                 titleFontSize=11,
                                 grid=True,
@@ -505,24 +526,16 @@ with col_report:
                         ),
                         y=alt.Y(
                             "指标:N",
-                            sort=alt.SortField("偏离基线 (%)", order="ascending"),
+                            sort=alt.SortField("差距 (%)", order="ascending"),
                             axis=alt.Axis(
                                 title=None, labelColor="#333", labelFontSize=12,
                             ),
                         ),
-                        color=alt.Color(
-                            "严重度:N",
-                            scale=severity_scale,
-                            legend=alt.Legend(
-                                title=None, orient="bottom", labelColor="#666"
-                            ),
-                        ),
                         tooltip=[
                             alt.Tooltip("指标:N"),
-                            alt.Tooltip("当前值:Q"),
-                            alt.Tooltip("基线值:Q"),
-                            alt.Tooltip("偏离基线 (%):Q", format="+.1f"),
-                            alt.Tooltip("严重度:N"),
+                            alt.Tooltip("你的:Q"),
+                            alt.Tooltip("同行做到:Q"),
+                            alt.Tooltip("差距 (%):Q", format="+.1f"),
                         ],
                     )
                     .properties(height=max(180, 38 * len(an_df)))
@@ -547,9 +560,8 @@ with col_report:
                         [
                             {
                                 "根因": c.get("root_cause"),
-                                "维度": c.get("dimension"),
-                                "置信度": c.get("confidence"),
-                                "交叉验证": c.get("cross_validation") or "—",
+                                "类别": c.get("dimension"),
+                                "另外查到的线索": c.get("cross_validation") or "—",
                             }
                             for c in (chain.get("candidates") or [])
                         ]
@@ -561,9 +573,8 @@ with col_report:
                             use_container_width=True,
                             column_config={
                                 "根因": st.column_config.TextColumn(width="large"),
-                                "维度": st.column_config.TextColumn(width="small"),
-                                "置信度": st.column_config.NumberColumn(format="%.2f", width="small"),
-                                "交叉验证": st.column_config.TextColumn(width="medium"),
+                                "类别": st.column_config.TextColumn(width="small"),
+                                "另外查到的线索": st.column_config.TextColumn(width="medium"),
                             },
                         )
                     st.markdown("")
@@ -593,13 +604,11 @@ with col_report:
                                 (a.get("resource") or {}).get("type"),
                                 (a.get("resource") or {}).get("type") or "—",
                             ),
-                            "针对指标": metric_zh(a.get("linked_anomaly_metric")),
-                            "性价比": COST_ZH.get(a.get("cost_benefit"), "—"),
-                            "置信度": a.get("confidence"),
-                            "门槛": "达成"
+                            "投入产出": COST_ZH.get(a.get("cost_benefit"), "—"),
+                            "你够格吗": "够"
                             if (a.get("eligibility") or {}).get("met")
-                            else "未达成",
-                            "资源入口": (a.get("resource") or {}).get("url"),
+                            else "差一点",
+                            "立刻去做": (a.get("resource") or {}).get("url"),
                         }
                         for a in actions
                     ]
@@ -611,12 +620,10 @@ with col_report:
                     column_config={
                         "建议": st.column_config.TextColumn(width="large"),
                         "资源类型": st.column_config.TextColumn(width="small"),
-                        "针对指标": st.column_config.TextColumn(width="small"),
-                        "性价比": st.column_config.TextColumn(width="small"),
-                        "置信度": st.column_config.NumberColumn(format="%.2f", width="small"),
-                        "门槛": st.column_config.TextColumn(width="small"),
-                        "资源入口": st.column_config.LinkColumn(
-                            "资源入口", display_text="打开", width="small"
+                        "投入产出": st.column_config.TextColumn(width="small"),
+                        "你够格吗": st.column_config.TextColumn(width="small"),
+                        "立刻去做": st.column_config.LinkColumn(
+                            "立刻去做", display_text="打开", width="small"
                         ),
                     },
                 )
