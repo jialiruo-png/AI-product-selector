@@ -203,9 +203,13 @@ class AnalyzeReviewsTool(BaseTool):
                 ],
             }
 
+        _load_client()  # 确保项目根 .env 已加载（DASHSCOPE_API_KEY / LLM_*）
         import analyze  # 需要 DASHSCOPE_API_KEY；惰性 import
+        # JSON 抽取类任务优先用非思考模型（LLM_MODEL_EXTRACT），避免 V4 思考模式
+        # 撞 analyze.py 写死的 max_tokens=2048 导致输出被截断、痛点全空。
+        extract_model = os.environ.get("LLM_MODEL_EXTRACT", "").strip() or None
         try:
-            result = analyze.analyze_reviews(reviews or [])
+            result = analyze.analyze_reviews(reviews or [], model=extract_model)
         except RuntimeError as exc:  # 缺 key / 缺包等运行期错误 -> 优雅降级
             return {"ok": False, "error": str(exc)}
         return {
@@ -220,7 +224,7 @@ class AnalyzeReviewsTool(BaseTool):
 # ============================ snapshot_write ============================
 class SnapshotWriteTool(BaseTool):
     name = "snapshot_write"
-    description = "把一次选品结果落库（runs + products [+ pain_points]），返回 run_id。"
+    description = "把一次选品结果落库（runs + products [+ reviews + pain_points]），返回 run_id。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -228,8 +232,10 @@ class SnapshotWriteTool(BaseTool):
             "keyword": {"type": "string"},
             "region": {"type": "string", "default": "US"},
             "scored": {"type": "array", "description": "rank_products 输出"},
+            "reviews": {"type": "array", "description": "可选：fetch_reviews 原始评论列表"},
             "analysis": {"type": "object", "description": "可选：analyze_reviews 输出"},
-            "target_id": {"type": "string", "description": "analysis 关联的商品 ID"},
+            "target_id": {"type": "string", "description": "reviews / analysis 关联的商品 ID"},
+            "run_id": {"type": "integer", "description": "可选：复用已有 run_id（不传则新建 run）"},
             "db_path": {"type": "string", "description": "可选：sqlite 路径"},
         },
         "required": ["keyword"],
@@ -243,15 +249,20 @@ class SnapshotWriteTool(BaseTool):
         self.mock = _mock_default() if mock is None else mock
 
     def _run(self, *, keyword: str, source: str = "tiktok", region: str = "US",
-             scored: list | None = None, analysis: dict | None = None,
-             target_id: str | None = None, db_path: str | None = None) -> dict:
+             scored: list | None = None, reviews: list | None = None,
+             analysis: dict | None = None, target_id: str | None = None,
+             run_id: int | None = None, db_path: str | None = None) -> dict:
         if self.mock:
-            return {"ok": True, "run_id": 1}
+            return {"ok": True, "run_id": run_id or 1}
 
         con = db.connect(db_path or db.DEFAULT_DB)
-        run_id = db.start_run(con, source, keyword, region=region)
+        # 传入 run_id 则复用（同一次跑的多笔落库挂同一 run），否则新建一条 run。
+        if run_id is None:
+            run_id = db.start_run(con, source, keyword, region=region)
         if scored:
             db.save_tiktok_products(con, run_id, scored)
+        if reviews and target_id:
+            db.save_reviews(con, source, target_id, reviews)
         if analysis and target_id:
             db.save_pain_points(con, run_id, source, target_id, analysis)
         return {"ok": True, "run_id": run_id}

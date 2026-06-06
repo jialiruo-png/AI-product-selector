@@ -40,6 +40,11 @@ class InsightState(TypedDict, total=False):
     # ---- 共享商品池（PriceAnalyzer 打分后写入，下游复用）----
     products: list
 
+    # ---- 落库（B3）----
+    db_path: str          # sqlite 路径；None 时落到 db.DEFAULT_DB
+    run_id: int           # Persist 节点新建 run 后透传，便于趋势复盘
+    review_raw: list      # [{product_id, reviews, analysis}]，CompetitorAnalyzer 收集供落库
+
     # ---- 证据引用（形如 KnowledgeEvidenceRef）----
     evidence_refs: list  # list[dict]: {refId,layer,sourceId,quoteOrSummary,confidence,status}
 

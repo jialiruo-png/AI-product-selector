@@ -24,6 +24,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--region", default="CN", help="地区/市场，如 US / CN")
     parser.add_argument("--topn", type=int, default=20, help="取 TopN 商品（默认 20）")
     parser.add_argument(
+        "--db",
+        default=None,
+        help="SQLite 落库路径（默认 采集工作台/outputs/selector.db；mock 模式不落库）",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="开启 mock 模式（设置 AGENT_MOCK=1，不打真实接口）",
@@ -53,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         "category": args.category,
         "region": args.region,
         "topn": args.topn,
+        "db_path": args.db,
     }
 
     final_state = asyncio.run(run_insight(initial_state))
@@ -62,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     print(report)
 
     # ---- trace 摘要 ----
-    backend = type(build_graph()).__name__
+    app = build_graph()
+    backend = getattr(app, "backend", type(app).__name__)
     trace = final_state.get("_trace") or []
     nodes_run = [t.get("node") for t in trace if isinstance(t, dict)]
     refs = final_state.get("evidence_refs") or []

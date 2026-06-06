@@ -2,3 +2,7 @@
 # openai SDK 用于 analyze.py 调千问（DashScope OpenAI 兼容端点）；
 # 若要切 DeepSeek / 智谱 / Kimi 等 OpenAI 兼容协议厂商，只改 .env 的 LLM_BASE_URL，无需换包。
 openai>=1.50.0
+
+# langgraph 真后端（AGENT_USE_LANGGRAPH=1 时启用）。
+# 未安装时 agent/graph.py 自动回退到内置 MiniGraph（纯 asyncio，无第三方依赖），不崩。
+langgraph>=0.2

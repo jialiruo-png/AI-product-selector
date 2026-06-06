@@ -20,8 +20,9 @@
 from __future__ import annotations
 
 import asyncio
+import operator
 import os
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
 from agent.nodes import (
     Briefing,
@@ -31,12 +32,13 @@ from agent.nodes import (
     Editor,
     HotItemAnalyzer,
     KeywordPlanner,
+    Persist,
     PriceAnalyzer,
     SocialAnalyzer,
 )
 
 # 需要"拼接合并"的 list 型字段（并行节点各写一份，须 concat 而非 last-writer-wins）。
-_LIST_MERGE_KEYS = ("_trace", "evidence_refs", "messages")
+_LIST_MERGE_KEYS = ("_trace", "evidence_refs", "messages", "review_raw")
 
 # 四路并行分析节点的属性名。
 _ANALYZER_KEYS = (
@@ -57,6 +59,7 @@ def _init_nodes() -> dict[str, Any]:
         "competitor_analyzer": CompetitorAnalyzer(),
         "collector": Collector(),
         "curator": Curator(),
+        "persist": Persist(),
         "briefing": Briefing(),
         "editor": Editor(),
     }
@@ -93,6 +96,8 @@ class MiniGraph:
           -> collector -> curator -> briefing -> editor
     """
 
+    backend = "MiniGraph"
+
     def __init__(self) -> None:
         self.nodes = _init_nodes()
 
@@ -110,8 +115,8 @@ class MiniGraph:
         for partial in results:
             _merge_partial(state, partial)
 
-        # 3) fan-in 之后顺序执行
-        for key in ("collector", "curator", "briefing", "editor"):
+        # 3) fan-in 之后顺序执行（persist 在 curator 后、briefing 前：products/review_raw 已就绪）
+        for key in ("collector", "curator", "persist", "briefing", "editor"):
             _merge_partial(state, await self.nodes[key].run(state))
 
         return state
@@ -120,39 +125,42 @@ class MiniGraph:
 # --------------------------------------------------------------------------- #
 # LangGraph 后端构建（可选）
 # --------------------------------------------------------------------------- #
+# langgraph 用 get_type_hints 解析 _GraphState 的注解；因 ``from __future__ import
+# annotations`` 注解全为字符串(forward ref)，求值时需 Annotated / operator / list
+# 在模块全局可见 —— 故本类与相关 import 必须放在模块级，不能塞进函数内。
+class _GraphState(TypedDict, total=False):
+    keyword: str
+    category: str
+    region: str
+    topn: int
+    keywords: list
+    social_data: dict
+    curated_social_data: dict
+    price_data: dict
+    curated_price_data: dict
+    hot_data: dict
+    curated_hot_data: dict
+    competitor_data: dict
+    curated_competitor_data: dict
+    products: list
+    db_path: str
+    run_id: int
+    briefings: dict
+    report: str
+    # 并发拼接字段：operator.add => 拼接（concat），其余字段默认 last-writer-wins。
+    evidence_refs: Annotated[list, operator.add]
+    messages: Annotated[list, operator.add]
+    _trace: Annotated[list, operator.add]
+    review_raw: Annotated[list, operator.add]
+
+
 def _build_langgraph_app():
     """构建并编译真实 LangGraph 应用。
 
     若 ``langgraph`` 未安装会抛 ImportError，由 build_graph 捕获后回退。
     返回一个带统一 ``async def ainvoke(state) -> dict`` 接口的包装对象。
     """
-    import operator
-    from typing import Annotated, TypedDict
-
     from langgraph.graph import StateGraph
-
-    # 为 list 型字段配置 reducer（operator.add => 拼接），其余字段默认覆盖。
-    class _GraphState(TypedDict, total=False):
-        keyword: str
-        category: str
-        region: str
-        topn: int
-        keywords: list
-        social_data: dict
-        curated_social_data: dict
-        price_data: dict
-        curated_price_data: dict
-        hot_data: dict
-        curated_hot_data: dict
-        competitor_data: dict
-        curated_competitor_data: dict
-        products: list
-        briefings: dict
-        report: str
-        # 并发拼接字段
-        evidence_refs: Annotated[list, operator.add]
-        messages: Annotated[list, operator.add]
-        _trace: Annotated[list, operator.add]
 
     nodes = _init_nodes()
     wf = StateGraph(_GraphState)
@@ -168,7 +176,8 @@ def _build_langgraph_app():
         wf.add_edge(label, "collector")
 
     wf.add_edge("collector", "curator")
-    wf.add_edge("curator", "briefing")
+    wf.add_edge("curator", "persist")
+    wf.add_edge("persist", "briefing")
     wf.add_edge("briefing", "editor")
 
     compiled = wf.compile()
