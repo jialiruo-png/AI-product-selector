@@ -124,6 +124,38 @@ def load_skills(dir: str | Path = SKILLS_DIR) -> dict[str, Skill]:
     return skills
 
 
+def skill_prompt(skill: Skill) -> str:
+    """把一个 Skill 拼成可注入 LLM 的中文 system 前缀（C1 配置即技能）。
+
+    只取「角色 / 核心目标 / SOP / 输出规范」四段语义，空字段自动跳过，永不抛。
+    节点把它拼到自己原硬编码 system 之前——MD 改了行为跟着变，
+    但 JSON 形状/字段名仍由节点原 prompt 锁定（MD 文案不破坏解析）。
+    """
+    if not isinstance(skill, Skill):
+        return ""
+    parts: list[str] = []
+    if skill.role:
+        parts.append(f"【角色】{skill.role.strip()}")
+    if skill.goal:
+        parts.append(f"【核心目标】{skill.goal.strip()}")
+    if skill.sop_steps:
+        steps = "\n".join(f"{i}. {s}" for i, s in enumerate(skill.sop_steps, 1))
+        parts.append(f"【作业流程 SOP】\n{steps}")
+    if skill.output_spec:
+        parts.append(f"【输出规范】{skill.output_spec.strip()}")
+    return "\n".join(parts).strip()
+
+
+def load_skill_prompt(name: str, dir: str | Path = SKILLS_DIR) -> str:
+    """按 Skill 名加载并返回其 prompt 前缀；缺 MD / 解析失败返回 ""（节点据此退回纯硬编码 prompt，不崩）。"""
+    try:
+        skills = load_skills(dir)
+    except Exception:  # noqa: BLE001 — 加载失败不致命，节点退回硬编码 prompt
+        return ""
+    skill = skills.get(name)
+    return skill_prompt(skill) if skill else ""
+
+
 def skill_chain(start: str, skills: dict[str, Skill]) -> list[str]:
     """沿 next_skill 串联，返回从 start 起的技能名链（防环）。"""
     chain: list[str] = []
