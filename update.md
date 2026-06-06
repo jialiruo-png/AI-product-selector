@@ -178,11 +178,55 @@ python3 -m agent.run "口红" --category 美妆 --mock
 
 **待补文档（开发前）**
 
-- `07-女装诊断Skill写作规范.md`：让 6 个 overlay 写法一致
-- `08-验收用例-女装真实场景.md`：3-5 个具体女装店真实诊断场景作为 V1 ground truth
-- mock 商家数据 JSON（可选，加快无 key 环境联调）
+- `07-女装诊断Skill写作规范.md`：让 6 个 overlay 写法一致 ✅ 已完成
+- `08-验收用例-女装真实场景.md`：3-5 个具体女装店真实诊断场景作为 V1 ground truth ✅ 已完成
+- mock 商家数据 JSON（Day 2 开发时同步建）
 
 **提交信息**
 
 `docs(prd): add diagnosis subgraph prd and team charter`
+
+---
+
+## 批次 6：女装诊断写作规范 + 验收用例（贾丽婼）
+
+> 更新日期：2026-06-04 晚
+> 负责人：贾丽婼（Liruo）
+> 状态：开发前置文档全部就位，准备进入 Day 1 开发
+
+**功能说明**
+
+- 新增 `07-女装诊断Skill写作规范.md`：定义 Skill MD 的 9 个标准章节、字段写作约束、6 个女装 overlay 差异化要点。核心约束：
+  - SOP 每步必须带决策点 + 工具 + fallback，禁止空话
+  - 输出 schema 必须含 evidence_refs + confidence + data_sources
+  - 行动建议必须挂可执行资源（activity_id / tool_url / template_id），禁止空建议
+- 新增 `08-验收用例-女装真实场景.md`：5 个具体女装店真实诊断 case，覆盖 6 个 overlay 的所有组合：
+  - Case 1 咖喱生活（自播 + 成长期）：转化率断崖式下跌
+  - Case 2 素笺布艺（货架店）：搜索流量塌方
+  - Case 3 初见女装铺（新店冷启动）：体验分 0 卡住
+  - Case 4 橙夏（达播店）：达人选品命中率低
+  - Case 5 夏树（自播 + 季节切换）：滞销库存压力 + 秋装缺货
+- 每个 case 都给了商家画像 / 数据现状 / 期望诊断 / 期望归因 / 期望建议四段对照
+- V1 整体验收线：5 个 case 至少通过 4 个
+
+**主要文件**
+
+- `07-女装诊断Skill写作规范.md`（新增）
+- `08-验收用例-女装真实场景.md`（新增）
+- `update.md`（追加本批次）
+
+**价值**
+
+把 V1 验收口径从"主观判断 AI 报告好不好"变成"5 个具体 case 对照打分"。开发期间随时跑这 5 个 case 看回归，避免 overlay 写偏。同时这 5 个 case 也直接作为面试演示素材（Case 1 用了体验抖店时截图过的真实商家，故事性最强）。
+
+**下一步**
+
+- Day 1 开发：3 个通用 Skill MD + 6 个女装 overlay + 4 份 Wiki 种子
+- Day 2 开发：4 个诊断节点骨架 + LangGraph 子图编排 + State 扩展 + mock 商家数据 JSON
+- Day 3 开发：接通真 LLM + 接 Hub 路由 + 跑通 5 个 case
+- Day 4 收尾：报告 markdown 优化 + 证据展示 + Streamlit demo + 演示话术
+
+**提交信息**
+
+`docs(diagnosis): add skill writing spec and v1 acceptance cases`
 
