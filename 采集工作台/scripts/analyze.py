@@ -78,7 +78,11 @@ def analyze_reviews(reviews: list[dict], *,
     if not api_key:
         raise RuntimeError("缺少 DASHSCOPE_API_KEY，请在项目根 .env 设置（千问 / 阿里云百炼 key）")
     base_url = os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL)
-    model = model or os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+    model = (
+        model
+        or os.environ.get("LLM_MODEL_EXTRACT")
+        or os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+    )
 
     client = OpenAI(api_key=api_key, base_url=base_url)
     payload = "\n".join(

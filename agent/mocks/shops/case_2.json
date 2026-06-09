@@ -1,0 +1,118 @@
+{
+  "_mock": true,
+  "_case_id": "case_2",
+  "_case_name": "素笺布艺",
+  "_overlay_hints": ["nvzhuang_huojia"],
+  "_scenario_summary": "女装货架店，搜索曝光跌 31% 但 CVR 稳定，流量入口端塌方",
+
+  "shop_profile": {
+    "shop_id": "mock_shop_002",
+    "shop_name": "素笺布艺",
+    "category": "女装>T恤/衬衫",
+    "entry_days": 530,
+    "shop_level": "L4",
+    "exp_score": 4.78,
+    "exp_score_threshold": 4.5,
+    "exp_score_gap": 0.28,
+    "is_new_shop": false,
+    "stage": "成熟期",
+    "monthly_gmv": 480000,
+    "monthly_gmv_prev": 552000,
+    "monthly_gmv_mom": -0.130,
+    "dau_gmv_share": {
+      "search": 0.52,
+      "mall": 0.28,
+      "recommend": 0.15,
+      "live": 0.05
+    }
+  },
+
+  "metrics_7d": {
+    "gmv": 85000,
+    "uv": 22000,
+    "cvr": 0.028,
+    "aov": 138,
+    "search_exposure": 180000,
+    "search_ctr": 0.042,
+    "main_image_ctr": 0.046,
+    "refund_rate": 0.052,
+    "shangcheng_jingxuan_eligible": true,
+    "shangcheng_jingxuan_joined": false
+  },
+  "metrics_prev_7d": {
+    "gmv": 112000,
+    "uv": 28800,
+    "cvr": 0.031,
+    "aov": 125,
+    "search_exposure": 260000,
+    "search_ctr": 0.048,
+    "main_image_ctr": 0.049,
+    "refund_rate": 0.048,
+    "shangcheng_jingxuan_eligible": true,
+    "shangcheng_jingxuan_joined": false
+  },
+  "metrics_30d": {
+    "gmv": 480000,
+    "uv": 110000,
+    "cvr": 0.029,
+    "aov": 132,
+    "refund_rate": 0.050
+  },
+
+  "category_baseline": {
+    "_source": "女装>T恤/衬衫·货架渠道行业均值（近 30 天）",
+    "search_ctr": 0.055,
+    "cvr": 0.029,
+    "review_score": 4.7,
+    "main_image_ctr": 0.052,
+    "refund_rate": 0.058
+  },
+
+  "traffic_breakdown": {
+    "search": {"uv": 11440, "gmv": 44200, "cvr": 0.030, "exposure": 180000},
+    "mall": {"uv": 6160, "gmv": 23800, "cvr": 0.027},
+    "recommend": {"uv": 3300, "gmv": 12750, "cvr": 0.026},
+    "live": {"uv": 1100, "gmv": 4250, "cvr": 0.024}
+  },
+
+  "title_keyword_audit": {
+    "high_freq_keywords_total": 10,
+    "high_freq_keywords_hit": 8,
+    "missing_keywords": ["冰丝", "显瘦"],
+    "hit_keywords": ["短袖", "纯棉", "白色", "通勤", "夏季", "宽松", "女款", "百搭"]
+  },
+
+  "review_metrics": {
+    "review_score": 4.6,
+    "review_count_7d": 184,
+    "negative_review_rate": 0.034
+  },
+
+  "sku_performance": [
+    {"sku_id": "sku_201", "sku_name": "纯棉短袖 T 恤", "price": 49, "gmv_7d": 22000, "uv_7d": 5800, "cvr": 0.029, "refund_rate": 0.04, "is_main_sku": true},
+    {"sku_id": "sku_202", "sku_name": "宽松白衬衫通勤款", "price": 119, "gmv_7d": 19500, "uv_7d": 4900, "cvr": 0.032, "refund_rate": 0.05, "is_main_sku": true},
+    {"sku_id": "sku_203", "sku_name": "条纹长袖衬衫", "price": 99, "gmv_7d": 14000, "uv_7d": 4200, "cvr": 0.028, "refund_rate": 0.06, "is_main_sku": false},
+    {"sku_id": "sku_204", "sku_name": "雪纺衬衫女夏", "price": 109, "gmv_7d": 11500, "uv_7d": 3800, "cvr": 0.026, "refund_rate": 0.05, "is_main_sku": false},
+    {"sku_id": "sku_205", "sku_name": "polo 衫显瘦版", "price": 89, "gmv_7d": 9800, "uv_7d": 3300, "cvr": 0.027, "refund_rate": 0.06, "is_main_sku": false}
+  ],
+
+  "rule_change_signals": [
+    {
+      "rule_id": "shangcheng_jingxuan_v1",
+      "rule_name": "商城精选频道",
+      "online_days": 28,
+      "weight_change": "明显提升",
+      "current_shop_joined": false,
+      "join_threshold": "评价分≥4.5 + 退款率<6%"
+    }
+  ],
+
+  "fulfillment_metrics": {
+    "ship_in_24h_rate": 0.96,
+    "ship_in_48h_rate": 0.99,
+    "dispute_rate": 0.009,
+    "negative_review_rate": 0.034
+  },
+
+  "newbie_progress": null
+}

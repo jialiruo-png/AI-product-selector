@@ -1,0 +1,95 @@
+{
+  "_mock": true,
+  "_case_id": "case_3",
+  "_case_name": "初见女装铺",
+  "_overlay_hints": ["nvzhuang_xindian"],
+  "_scenario_summary": "新店入驻 35 天但 0 商品上架，体验分卡在突破阶段",
+
+  "shop_profile": {
+    "shop_id": "mock_shop_003",
+    "shop_name": "初见女装铺",
+    "category": "女装>连衣裙",
+    "entry_days": 35,
+    "shop_level": "L1",
+    "exp_score": 0.0,
+    "exp_score_stage": "突破阶段",
+    "exp_score_threshold": 4.5,
+    "exp_score_gap": -4.5,
+    "is_new_shop": true,
+    "stage": "新店冷启动期",
+    "monthly_gmv": 0,
+    "monthly_gmv_prev": 0,
+    "monthly_gmv_mom": 0,
+    "dau_gmv_share": null
+  },
+
+  "metrics_7d": {
+    "gmv": 0,
+    "uv": 0,
+    "cvr": 0,
+    "aov": 0,
+    "main_image_ctr": 0,
+    "refund_rate": 0,
+    "_note": "无有效交易数据，新店尚未激活"
+  },
+  "metrics_prev_7d": {
+    "gmv": 0,
+    "uv": 0,
+    "cvr": 0,
+    "aov": 0
+  },
+  "metrics_30d": {
+    "gmv": 0,
+    "uv": 0,
+    "cvr": 0,
+    "aov": 0
+  },
+
+  "category_baseline": {
+    "_source": "女装>连衣裙·新店冷启动期行业基线（前 30 天）",
+    "newbie_avg_first_publish_days": 7,
+    "newbie_avg_sku_count_30d": 12,
+    "newbie_avg_first_order_days": 14,
+    "tixianfen_breakthrough_threshold": "突破 0 分需 1 件非闪购非奖品商品产生交易"
+  },
+
+  "traffic_breakdown": {},
+
+  "sku_performance": [],
+
+  "fulfillment_metrics": {
+    "ship_in_24h_rate": null,
+    "ship_in_48h_rate": null,
+    "dispute_rate": null,
+    "negative_review_rate": null
+  },
+
+  "newbie_progress": {
+    "online_sku_count": 0,
+    "first_product_published": false,
+    "newbie_task_total": 10,
+    "newbie_task_done": 3,
+    "newbie_task_remaining": 7,
+    "newbie_task_completion_rate": 0.30,
+    "completed_tasks": [
+      "实名认证",
+      "店铺基础信息填写",
+      "保证金缴纳"
+    ],
+    "remaining_tasks": [
+      "上架第一个商品",
+      "完成店铺装修首页",
+      "完成商品详情页装修",
+      "绑定企业账户",
+      "参与新手培训",
+      "开通运费险",
+      "设置客服话术"
+    ],
+    "store_decoration_complete": false,
+    "store_homepage_complete": false,
+    "store_product_page_complete": false,
+    "tixianfen_breakthrough_eligible": false,
+    "xindian_lengqidong_activity_eligible": true,
+    "xindian_lengqidong_activity_joined": false
+  }
+}

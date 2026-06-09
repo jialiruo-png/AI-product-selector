@@ -6,3 +6,6 @@ openai>=1.50.0
 # langgraph 真后端（AGENT_USE_LANGGRAPH=1 时启用）。
 # 未安装时 agent/graph.py 自动回退到内置 MiniGraph（纯 asyncio，无第三方依赖），不崩。
 langgraph>=0.2
+
+# demo/streamlit_app.py 用（副窗口任务 B）；仅演示界面用，不影响 agent 主链路和 MiniGraph 兜底。
+streamlit>=1.36.0

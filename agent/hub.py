@@ -1,8 +1,14 @@
 """Hub Agent —— 路由层（PRD 1.1）。
 
 MVP 用关键词/规则做意图识别（非 LLM），把商家自然语言路由到对应专家，
-并沿 Skill MD 的 next_skill 串成 Skill 链。● 档（洞察类）意图直接驱动
-已建好的 P0 商机洞察子图（agent.graph.run_insight）；◐/○ 档专家标 future。
+并沿 Skill MD 的 next_skill 串成 Skill 链。
+
+意图档位（路由优先级 = 列表顺序）：
+- P0 经营诊断（贾丽婼诊断子图）：在运营商家 GMV/成交诊断
+- P1 ◐ 本地可执行专家（甘华梁）：核价 / 客服，直接走 agent/nodes 下的本地节点
+- P2 ○ 未来档专家：罗盘归因 / 经营OKR / 直播 / 短视频，仅返回路由计划
+- P3 ● 洞察档（甘华梁冷启动子图）：选品 / 关键词 / 竞品 / 爆款策划 / 口碑诊断
+- 兜底：选品链
 """
 from __future__ import annotations
 
@@ -12,22 +18,29 @@ from typing import Any
 from agent.skills.loader import load_skills, skill_chain
 
 # 意图 -> (起始 Skill, 触发关键词)。规则按列表顺序匹配，先命中先生效。
+# 经营诊断意图（贾丽婼）排在最前——明确针对"在运营商家"场景，避免被"诊断"
+# 字眼误路由到甘华梁的"口碑诊断"链。
 _INTENT_RULES: list[tuple[str, str, list[str]]] = [
-    ("口碑诊断", "口碑诊断", ["差评", "口碑", "痛点", "评价", "诊断", "好评"]),
+    ("经营诊断", "经营诊断", [
+        "卖不动", "卖不好", "gmv 跌", "gmv跌", "成交跌", "店铺诊断",
+        "经营诊断", "经营报告", "店铺体检", "为什么没卖好", "为什么跌",
+        "复盘", "我的店", "店铺", "诊断我", "体验分", "退款率",
+    ]),
+    ("口碑诊断", "口碑诊断", ["差评", "口碑", "痛点", "评价", "好评"]),
     ("竞品", "竞品", ["竞品", "对标", "竞争", "对手"]),
     ("爆款策划", "爆款策划", ["爆款", "主图", "卖点", "元素"]),
     ("关键词", "关键词", ["关键词", "词根", "趋势", "需求"]),
     ("选品", "选品", ["选品", "好卖", "卖什么", "商机", "机会"]),
 ]
 
-# ◐ 本地可执行专家（D1）：不接洞察子图，走 agent/nodes 下的独立本地节点。
+# ◐ 本地可执行专家（甘华梁 D1）：不接洞察子图，走 agent/nodes 下的独立本地节点。
 # intent -> {expert: 节点标识, tier}。route 命中即返回 {local: True, expert, ...}。
 _LOCAL_EXPERTS: dict[str, dict] = {
     "核价": {"expert": "pricing", "tier": "◐"},
     "客服": {"expert": "support", "tier": "◐"},
 }
 
-# 本地专家触发词（先于 ● 洞察档、先于 ○ future 匹配）
+# 本地专家触发词（优先级在经营诊断之后、其他洞察/future 之前）
 _LOCAL_KEYWORDS: list[tuple[str, list[str]]] = [
     ("核价", ["核价", "核算", "利润", "成本", "定价", "毛利", "净利"]),
     ("客服", ["客服", "咨询", "退换货", "退货", "退款", "物流", "怎么退"]),
@@ -74,24 +87,38 @@ class HubAgent:
         self._pricing_cost = pricing_cost
 
     def route(self, query: str) -> dict:
-        """规则路由：返回 {intent, skill_chain, entry}。
+        """规则路由：返回 {intent, ...}。
 
-        非 ● 档（客服/罗盘/OKR...）返回 {status:future, tier, intent}。
+        优先级：经营诊断（贾丽婼）→ ◐ 本地核价/客服（甘华梁）→ ○ future 档
+              → 其他 ● 洞察档（甘华梁冷启动子图）→ 兜底选品。
+        把"经营诊断"放在最前，避免被 future 档的"罗盘/gmv"关键词抢路由；
+        把"本地核价/客服"放在 future 之前，避免被 future 默认覆盖。
         """
         q = (query or "").lower()
 
-        # 先看是否命中 ◐ 本地可执行专家（核价/客服）—— 走本地节点，非 future
+        # P0：经营诊断意图（贾丽婼诊断子图）
+        for intent, entry, kws in _INTENT_RULES:
+            if intent == "经营诊断" and any(k in q for k in kws):
+                return {
+                    "intent": intent,
+                    "skill_chain": skill_chain(entry, self.skills),
+                    "entry": entry,
+                }
+
+        # P1：◐ 本地可执行专家（核价/客服）—— 走本地节点，非 future
         for name, kws in _LOCAL_KEYWORDS:
             if any(k in q for k in kws):
                 return {"intent": name, "local": True, **_LOCAL_EXPERTS[name]}
 
-        # 再看是否命中 ○ 未来档专家
+        # P2：○ 未来档专家
         for name, kws in _FUTURE_KEYWORDS:
             if any(k in q for k in kws):
                 return {"intent": name, **_FUTURE_TIERS[name]}
 
-        # ● 洞察档意图匹配
+        # P3：其他 ● 洞察档（甘华梁冷启动子图）
         for intent, entry, kws in _INTENT_RULES:
+            if intent == "经营诊断":
+                continue  # 已在 P0 处理
             if any(k in q for k in kws):
                 return {
                     "intent": intent,
@@ -149,9 +176,34 @@ class HubAgent:
                     "note": f"本地专家执行失败，仅返回路由计划：{exc}"}
         return {**plan, "keyword": keyword, "result": result}
 
-    async def handle(self, query: str) -> dict:
-        """路由后分派：◐ 本地专家走本地节点；● 洞察档驱动 P0 洞察子图；○ future 仅返回计划。"""
+    async def handle(self, query: str, shop_id: str | None = None) -> dict:
+        """路由后分派：
+
+        - 经营诊断意图（贾丽婼）→ run_diagnosis（线性子图，4 节点）
+        - ◐ 本地专家（甘华梁）→ _handle_local（核价/客服本地节点）
+        - ● 洞察档（甘华梁）→ run_insight（4 路并行子图，9 节点）
+        - ○ future 档：仅返回 route 计划
+        """
         plan = self.route(query)
+
+        # 经营诊断意图：分发到诊断子图
+        if plan.get("intent") == "经营诊断":
+            try:
+                from agent.graph import run_diagnosis  # 延迟导入，缺失不影响 demo
+            except Exception as exc:  # noqa: BLE001
+                return {**plan, "diagnosis": None,
+                        "note": f"run_diagnosis 不可用：{exc}"}
+            try:
+                initial_state = {
+                    "shop_id": shop_id or "case_1",
+                    "user_query": query,
+                    "window": "7d",
+                }
+                final_state = await run_diagnosis(initial_state)
+                return {**plan, "shop_id": initial_state["shop_id"], "diagnosis": final_state}
+            except Exception as exc:  # noqa: BLE001
+                return {**plan, "diagnosis": None,
+                        "note": f"诊断子图执行失败：{exc}"}
 
         # ◐ 本地可执行专家（核价/客服）
         if plan.get("local"):
@@ -183,5 +235,14 @@ class HubAgent:
 
 if __name__ == "__main__":  # pragma: no cover
     h = HubAgent()
-    for q in ["帮我看看口红有什么好卖的", "竞品对标怎么做", "这商品差评好多", "新品怎么打爆款", "今天该看什么罗盘"]:
+    for q in [
+        "帮我看看口红有什么好卖的",
+        "竞品对标怎么做",
+        "这商品差评好多",
+        "新品怎么打爆款",
+        "今天该看什么罗盘",
+        "我店铺最近 GMV 跌了",
+        "帮我算下这件商品的核价",
+        "买家问怎么退货",
+    ]:
         print(q, "->", h.route(q))

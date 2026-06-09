@@ -1,135 +1,158 @@
-"""统一 LLM 抽象（B1）—— 给 agent 层节点调真实大模型用。
+"""LLM 统一封装：DashScope/千问 OpenAI 兼容端点（融合甘华梁 + 贾丽婼两套 API）。
 
-走 OpenAI 兼容协议，复用 .env 里的同一套配置（与 analyze.py 一致）：
-    DASHSCOPE_API_KEY   厂商 key（变量名历史遗留，值可以是 DeepSeek key）
-    LLM_BASE_URL        OpenAI 兼容端点
-    LLM_MODEL           生成类任务模型（精准词 / 人群 / 摘要），默认走思考模式提质
-    LLM_MODEL_EXTRACT   JSON 抽取类任务模型，建议非思考模型避免 token 截断
+设计原则：
+1. 缺 key / AGENT_MOCK=1 / openai 包未装 → 全部走 mock，永不崩
+2. 两个对外函数：chat_json(system, user) → dict, chat_text(system, user) → str
+3. 自动加载 .env（如果有 python-dotenv），否则简单解析
+4. 模型/base_url/api_key 全从环境变量取，与 采集工作台/scripts/analyze.py 共享同一份配置
+5. 调用层不知道是真 LLM 还是 mock —— mock 返回会带 `_mock: True` 标记
+6. 兼容两套调用风格：
+   - `has_llm()` / `available()` 均可（两个名字均导出，互为别名）
+   - chat_json/chat_text 不传 mock_fallback 时默认 dict/str fallback（与运营版一致）；
+     甘华梁端点用 `isinstance(data, dict)` + 字段缺失判定，依然能 graceful fallback
 
-为什么独立成模块而不复用 analyze.py：
-    - analyze.py 属 `采集工作台/scripts/`（禁改），且只服务"评论痛点抽取"这一固定场景
-      （写死 system prompt + max_tokens=2048）。agent 层需要任意 prompt、可调 max_tokens，
-      故在 agent/ 内另起一个轻量通用客户端。
-
-健壮性约定（与全局一致）：
-    - mock 模式（AGENT_MOCK=1）或缺 key / 缺包时 available() 返回 False，
-      调用方据此回退到 mock 文案，整条 graph 永不崩。
-    - chat_*() 调用失败一律返回 None（不抛），调用方回退 mock。
+环境变量：
+    DASHSCOPE_API_KEY    厂商 key（变量名历史遗留，可放任意兼容 OpenAI 协议厂商的 key）
+    LLM_BASE_URL         OpenAI 兼容端点，默认 https://dashscope.aliyuncs.com/compatible-mode/v1
+    LLM_MODEL            生成类任务模型，默认 qwen-plus
+    LLM_MODEL_EXTRACT    JSON 抽取类任务模型（非思考，防 token 截断）；缺省回退 LLM_MODEL
+    AGENT_MOCK           设为 1 强制走 mock（即使有 key）
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
-try:
-    from openai import OpenAI
-except ImportError:  # openai 未装时整层降级到 mock
-    OpenAI = None  # type: ignore[assignment]
-
-# DeepSeek 默认端点；.env 里 LLM_BASE_URL 会覆盖
-_DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
-_DEFAULT_MODEL = "deepseek-v4-pro"
-
-# 项目根（agent/ 的上一级），用于加载 .env
-_ROOT = Path(__file__).resolve().parents[1]
-
-_env_loaded = False
+logger = logging.getLogger(__name__)
 
 
-def _load_env_once() -> None:
-    """惰性加载项目根 .env（复用采集脚本的 load_env，不覆盖已有环境变量）。"""
-    global _env_loaded
-    if _env_loaded:
+# ---- 自动加载 .env（如有 python-dotenv 则用，否则简单读取）----
+def _autoload_env() -> None:
+    """优先用 python-dotenv，否则简单解析项目根 .env。"""
+    if os.environ.get("DASHSCOPE_API_KEY"):
+        return  # 已经在环境里，不重复加载
+    project_root = Path(__file__).resolve().parents[1]
+    env_file = project_root / ".env"
+    if not env_file.exists():
         return
-    _env_loaded = True
     try:
-        import sys
-        scripts = _ROOT / "采集工作台" / "scripts"
-        if str(scripts) not in sys.path:
-            sys.path.insert(0, str(scripts))
-        import _tikhub_client as tk  # type: ignore
-        tk.load_env(_ROOT)
-    except Exception:  # noqa: BLE001  加载失败不致命，后续 available() 会判 key
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv(env_file)
+        return
+    except ImportError:
+        pass
+    # 简单 fallback：手动解析 KEY=VALUE
+    try:
+        for raw in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except OSError:
         pass
 
 
-def _is_mock() -> bool:
-    return os.getenv("AGENT_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
+_autoload_env()
+
+
+DEFAULT_MODEL = "qwen-plus"
+DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def _is_mock_forced() -> bool:
+    return os.environ.get("AGENT_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _api_key() -> str:
-    _load_env_once()
-    return os.environ.get("DASHSCOPE_API_KEY", "").strip()
+    return (os.environ.get("DASHSCOPE_API_KEY") or "").strip()
 
 
-def available() -> bool:
-    """是否可调真实 LLM：非 mock、装了 openai、配了 key。"""
-    if _is_mock() or OpenAI is None:
-        return False
-    return bool(_api_key())
-
-
-def _client() -> Any:
-    base_url = os.environ.get("LLM_BASE_URL", "").strip() or _DEFAULT_BASE_URL
-    return OpenAI(api_key=_api_key(), base_url=base_url)
-
-
-def _gen_model() -> str:
-    return os.environ.get("LLM_MODEL", "").strip() or _DEFAULT_MODEL
+def _model() -> str:
+    return os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL
 
 
 def _extract_model() -> str:
-    # 抽取类优先用 LLM_MODEL_EXTRACT（非思考，防 token 截断），缺省回退生成模型
-    return os.environ.get("LLM_MODEL_EXTRACT", "").strip() or _gen_model()
+    """JSON 抽取任务专用模型（非思考模型，防 token 截断）；未设则回退 _model()。"""
+    return os.environ.get("LLM_MODEL_EXTRACT", "").strip() or _model()
 
 
-def chat_text(system: str, user: str, *,
-              max_tokens: int = 1024, temperature: float = 0.6) -> str | None:
-    """自由文本生成（人群洞察 / 简报 / 报告润色）。失败返回 None。"""
-    if not available():
-        return None
+def _base_url() -> str:
+    return os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_BASE_URL
+
+
+def has_llm() -> bool:
+    """是否能调真 LLM（未强制 mock、openai 已安装、配了 key）。"""
+    if _is_mock_forced():
+        return False
+    if not _api_key():
+        return False
     try:
-        resp = _client().chat.completions.create(
-            model=_gen_model(),
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return (resp.choices[0].message.content or "").strip() or None
-    except Exception:  # noqa: BLE001  调用失败 -> 调用方回退 mock
-        return None
+        import openai  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
-def _extract_json_text(text: str) -> Any:
-    """从模型输出里抠 JSON：去 markdown 围栏后 json.loads，失败返回 None。"""
+# 甘华梁端点用的旧名字，保留为别名（与 has_llm 完全等价）
+available = has_llm
+
+
+def _client():
+    """构造 OpenAI 兼容客户端。调用方需先 has_llm() 确认。"""
+    from openai import OpenAI
+    return OpenAI(api_key=_api_key(), base_url=_base_url())
+
+
+def _extract_json(text: str) -> dict:
+    """容错解析 LLM 返回的 JSON 文本。失败返回 {"_raw":..., "_parse_error": True}。"""
     text = (text or "").strip()
     if "```" in text:
-        # 取第一对围栏内的内容
-        body = text.split("```json", 1)[-1] if "```json" in text else text.split("```", 1)[-1]
-        text = body.split("```", 1)[0].strip()
+        # 剥掉 markdown 围栏
+        if "```json" in text:
+            text = text.split("```json", 1)[-1]
+        text = text.split("```", 1)[0].strip()
+        if not text:
+            return {"_raw": "(空)"}
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    except json.JSONDecodeError:
+        return {"_raw": text[:500], "_parse_error": True}
 
 
-def chat_json(system: str, user: str, *,
-              max_tokens: int = 1024, temperature: float = 0.3) -> Any | None:
-    """结构化 JSON 抽取（精准词列表 / 结构化人群）。失败或解析失败返回 None。
+def chat_json(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.3,
+    mock_fallback: dict | None = None,
+) -> dict:
+    """LLM 结构化输出：返回 dict。
 
-    用 LLM_MODEL_EXTRACT（非思考模型），并要求 system 里含 'json' 字样以触发
-    response_format=json_object（与 analyze.py 同款约束）。
+    - 模型默认走 LLM_MODEL_EXTRACT（非思考，防 JSON 被截断）；可通过 model 参数覆盖
+    - mock 模式或调用失败时返回 mock_fallback（默认 {"_mock": True}）
+    - system 提示词必须包含 "json" 字样（DashScope 限制），否则会自动追加
     """
-    if not available():
-        return None
+    fallback: dict[str, Any] = dict(mock_fallback or {"_mock": True})
+
+    if not has_llm():
+        return fallback
+
+    # DashScope 的 response_format json_object 要求 system 含 "json"
+    if "json" not in system.lower():
+        system = system + "\n请严格按 JSON 格式输出。"
+
     try:
         resp = _client().chat.completions.create(
-            model=_extract_model(),
+            model=model or _extract_model(),
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -138,6 +161,68 @@ def chat_json(system: str, user: str, *,
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return _extract_json_text(resp.choices[0].message.content or "")
-    except Exception:  # noqa: BLE001
-        return None
+        text = resp.choices[0].message.content or ""
+        out = _extract_json(text)
+        # 附带 usage 信息以便上层做 token 监控
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            out.setdefault("_usage", {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001 — LLM 失败不许影响主链路
+        logger.debug("chat_json 调用失败，走 fallback：%s", exc)
+        return {**fallback, "_llm_error": str(exc)[:200]}
+
+
+def chat_text(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 512,
+    temperature: float = 0.5,
+    mock_fallback: str = "",
+) -> str:
+    """LLM 自由文本输出：返回 str。
+
+    mock 模式或调用失败时返回 mock_fallback。
+    """
+    if not has_llm():
+        return mock_fallback
+
+    try:
+        resp = _client().chat.completions.create(
+            model=model or _model(),
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("chat_text 调用失败，走 fallback：%s", exc)
+        return mock_fallback
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # 自检：打印当前 LLM 配置状态
+    print(f"has_llm = {has_llm()}")
+    print(f"model = {_model()}")
+    print(f"extract_model = {_extract_model()}")
+    print(f"base_url = {_base_url()}")
+    print(f"api_key_set = {bool(_api_key())}")
+    print(f"mock_forced = {_is_mock_forced()}")
+    # 跑一次最小调用
+    if has_llm():
+        out = chat_text(
+            system="你是一个简短回复助手。",
+            user="用一句话总结：天空为什么是蓝色的？",
+            max_tokens=80,
+        )
+        print(f"\n[LLM 自检输出]\n{out}")
+    else:
+        print("\n（mock 模式，跳过实际调用）")

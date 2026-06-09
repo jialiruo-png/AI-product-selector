@@ -1,0 +1,109 @@
+{
+  "_mock": true,
+  "_case_id": "case_1",
+  "_case_name": "咖喱生活",
+  "_overlay_hints": ["nvzhuang_zibo", "nvzhuang_chengzhang"],
+  "_scenario_summary": "女装自播店成长期，CVR 从 2.1% 断崖跌至 1.3%",
+
+  "shop_profile": {
+    "shop_id": "mock_shop_001",
+    "shop_name": "咖喱生活优品铺子",
+    "category": "女装>连衣裙",
+    "entry_days": 142,
+    "shop_level": "L3",
+    "exp_score": 4.3,
+    "exp_score_threshold": 4.5,
+    "exp_score_gap": -0.2,
+    "is_new_shop": false,
+    "stage": "成长期",
+    "monthly_gmv": 870000,
+    "monthly_gmv_prev": 1420000,
+    "monthly_gmv_mom": -0.387,
+    "dau_gmv_share": {
+      "live": 0.65,
+      "video": 0.15,
+      "search": 0.12,
+      "mall": 0.08
+    }
+  },
+
+  "metrics_7d": {
+    "gmv": 120000,
+    "uv": 82000,
+    "cvr": 0.013,
+    "aov": 113,
+    "live_room_stay_sec": 22,
+    "fanzhuan_rate": 0.014,
+    "uv_value": 1.46,
+    "main_image_ctr": 0.051,
+    "qianchuan_roi": 0.8,
+    "refund_rate": 0.082
+  },
+  "metrics_prev_7d": {
+    "gmv": 280000,
+    "uv": 91000,
+    "cvr": 0.021,
+    "aov": 146,
+    "live_room_stay_sec": 48,
+    "fanzhuan_rate": 0.028,
+    "uv_value": 3.08,
+    "main_image_ctr": 0.068,
+    "qianchuan_roi": 1.6,
+    "refund_rate": 0.061
+  },
+  "metrics_30d": {
+    "gmv": 870000,
+    "uv": 380000,
+    "cvr": 0.017,
+    "aov": 130,
+    "refund_rate": 0.071
+  },
+
+  "category_baseline": {
+    "_source": "女装>连衣裙·自播渠道行业均值（近 30 天）",
+    "cvr": 0.024,
+    "aov": 128,
+    "live_room_stay_sec": 60,
+    "fanzhuan_rate": 0.030,
+    "main_image_ctr": 0.075,
+    "refund_rate": 0.075,
+    "qianchuan_roi": 1.3
+  },
+
+  "traffic_breakdown": {
+    "live": {"uv": 53300, "gmv": 78000, "cvr": 0.012},
+    "video": {"uv": 12300, "gmv": 18000, "cvr": 0.014},
+    "search": {"uv": 9840, "gmv": 14400, "cvr": 0.018},
+    "mall": {"uv": 6560, "gmv": 9600, "cvr": 0.020}
+  },
+
+  "sku_performance": [
+    {"sku_id": "sku_001", "sku_name": "法式碎花连衣裙", "price": 159, "gmv_7d": 38000, "uv_7d": 18000, "cvr": 0.011, "refund_rate": 0.11, "is_main_sku": true},
+    {"sku_id": "sku_002", "sku_name": "气质连衣裙夏季新款", "price": 119, "gmv_7d": 27000, "uv_7d": 15500, "cvr": 0.014, "refund_rate": 0.08, "is_main_sku": true},
+    {"sku_id": "sku_003", "sku_name": "雪纺长裙度假风", "price": 89, "gmv_7d": 19000, "uv_7d": 13200, "cvr": 0.016, "refund_rate": 0.07, "is_main_sku": false},
+    {"sku_id": "sku_004", "sku_name": "茶歇连衣裙小香风", "price": 139, "gmv_7d": 22000, "uv_7d": 14800, "cvr": 0.013, "refund_rate": 0.09, "is_main_sku": false},
+    {"sku_id": "sku_005", "sku_name": "印花吊带连衣裙", "price": 79, "gmv_7d": 14000, "uv_7d": 11500, "cvr": 0.017, "refund_rate": 0.06, "is_main_sku": false}
+  ],
+
+  "competitor_signals": [
+    {"sku_name": "柚子定制 M9", "price": 59.9, "sales_7d": 1096, "highlight": "主图突出价格锚定 + 显瘦标签"}
+  ],
+
+  "fulfillment_metrics": {
+    "ship_in_24h_rate": 0.91,
+    "ship_in_48h_rate": 0.97,
+    "dispute_rate": 0.018,
+    "negative_review_rate": 0.024
+  },
+
+  "live_room_metrics": {
+    "live_sessions_7d": 14,
+    "live_total_hours": 92,
+    "avg_concurrent_viewers": 380,
+    "welcome_message_template": "default",
+    "fudai_schedule_min": 18,
+    "shanglian_ctr": 0.045
+  },
+
+  "newbie_progress": null
+}
